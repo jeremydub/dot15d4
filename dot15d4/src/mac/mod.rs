@@ -158,6 +158,9 @@ where
             // TODO: remove this artifact from the old CSMA implementation
             rx_frame.dirty = true;
 
+            // TODO: ACK should be handled (together with filtering, signing, en-/decryption, etc.)
+            //       in generic ingress/egress procedures, see IEEE 802.15.4-2020, sections 6.7 and 9.2.
+            // TODO: Implement hook for ACK driver offloading.
             // Optional ack frame that is used if required
             let mut ack_frame = None;
             self.prepare_ack(&mut rx_frame, &mut ack_frame);
