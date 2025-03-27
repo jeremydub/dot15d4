@@ -13,6 +13,8 @@ pub mod mac;
 pub mod phy;
 pub mod sync;
 pub mod time;
+// TODO: "upper" is relative to the MAC. It would be great if we could find a
+//       context-free name.
 pub mod upper;
 
 use crate::{
