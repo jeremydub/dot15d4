@@ -119,20 +119,18 @@ where
     /// now, the loop waits for either receiving a command from
     /// upper layer or receiving a frame/indication from PHY sublayer.
     pub async fn run(&mut self) -> ! {
-        let mut indication = None;
-
         loop {
             yield_now().await;
             // Wait until we either have a command to process from the upper layer or we
             // receive an indication from the PHY sublayer
             match select::select(
                 self.upper_layer.mac_request(),
-                self.receive_indication(&mut indication),
+                self.receive_indication(),
             )
             .await
             {
                 Either::First(request) => self.handle_request(request).await,
-                Either::Second(_) => self.handle_indication(&mut indication).await,
+                Either::Second(indication) => self.handle_indication(indication).await,
             };
         }
     }
@@ -151,42 +149,44 @@ where
         self.rx_recv.receive().await
     }
 
-    async fn receive_indication(&self, indication: &mut Option<MacIndication>) {
-        let mut rx_frame = self.phy_receive().await;
-        // TODO: remove this artifact from the old CSMA implementation
-        rx_frame.dirty = true;
+    async fn receive_indication(&self) -> MacIndication {
+        loop {
+            let mut rx_frame = self.phy_receive().await;
+            // TODO: remove this artifact from the old CSMA implementation
+            rx_frame.dirty = true;
 
-        // Optional ack frame that is used if required
-        let mut ack_frame = None;
-        self.prepare_ack(&mut rx_frame, &mut ack_frame);
+            // Optional ack frame that is used if required
+            let mut ack_frame = None;
+            self.prepare_ack(&mut rx_frame, &mut ack_frame);
 
-        // Acknowledgment is sent while the indication is processed
-        join::join(self.transmit_ack(&mut ack_frame), async {
-            let frame_type = {
-                let frame = R::RadioFrame::new_checked(&mut rx_frame.buffer[..]).unwrap();
-                let frame = Frame::new(frame.data()).unwrap();
-                frame.frame_control().frame_type()
-            };
-            // TODO: support timestamp
-            let timestamp = 0;
-            *indication = match frame_type {
-                FrameType::Data => Some(MacIndication::McpsData(mcps::data::DataIndication {
-                    buffer: rx_frame,
-                    timestamp,
-                })),
-                FrameType::Beacon => Some(MacIndication::MlmeBeaconNotify(
-                    mlme::beacon::BeaconNotifyIndication {
+            // Acknowledgment is sent while the indication is processed
+            join::join(self.transmit_ack(&mut ack_frame), async {
+                let frame_type = {
+                    let frame = RadioFrame::new_checked(&mut rx_frame.buffer[..]).unwrap();
+                    let frame = Frame::new(frame.data()).unwrap();
+                    frame.frame_control().frame_type()
+                };
+                // TODO: support timestamp
+                let timestamp = 0;
+                match frame_type {
+                    FrameType::Data => break MacIndication::McpsData(mcps::data::DataIndication {
                         buffer: rx_frame,
                         timestamp,
-                    },
-                )),
-                _ => None,
-            }
-        })
-        .await;
+                    }),
+                    FrameType::Beacon => break MacIndication::MlmeBeaconNotify(
+                        mlme::beacon::BeaconNotifyIndication {
+                            buffer: rx_frame,
+                            timestamp,
+                        },
+                    ),
+                    _ => {},
+                }
+            })
+                .await;
+        }
     }
 
-    async fn handle_indication(&self, indication: &mut Option<MacIndication>) {
+    async fn handle_indication(&self, indication: MacIndication) {
         if let Some(indication) = indication {
             match indication {
                 MacIndication::McpsData(data_indication) => {
