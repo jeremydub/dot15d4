@@ -69,10 +69,10 @@ where
         })
     }
 
-    pub async fn mcps_data_indication(&self, indication: &mut DataIndication) {
+    pub async fn mcps_data_indication(&self, indication: DataIndication) {
         self.upper_layer
             .process_mac_indication(crate::mac::primitives::MacIndication::McpsData(
-                core::mem::take(indication),
+                indication,
             ))
             .await;
     }

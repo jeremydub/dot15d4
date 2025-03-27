@@ -45,7 +45,7 @@ where
 
     pub(crate) async fn mlme_beacon_notify_indication(
         &self,
-        _indication: &mut BeaconNotifyIndication,
+        _indication: BeaconNotifyIndication,
     ) {
         // TODO: support Beacon Notify indication
         info!("Received Beacon Notification");

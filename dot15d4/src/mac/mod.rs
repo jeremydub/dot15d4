@@ -122,28 +122,22 @@ where
     /// now, the loop waits for either receiving a command from
     /// upper layer or receiving a frame/indication from PHY sublayer.
     pub async fn run(&mut self) -> ! {
-        let mut indication = None;
-
         loop {
             yield_now().await;
             // Wait until we either have a command to process from the upper layer or we
             // receive an indication from the PHY sublayer
-            match select::select(
-                self.upper_layer.mac_request(),
-                self.receive_indication(&mut indication),
-            )
-            .await
-            {
+            match select::select(self.upper_layer.mac_request(), self.receive_indication()).await {
                 Either::First(request) => {
                     #[cfg(feature = "rtos-trace")]
                     rtos_trace::trace::task_exec_begin(MAC_REQUEST);
                     self.handle_request(request).await;
                 }
-                Either::Second(_) => {
+                Either::Second(Some(indication)) => {
                     #[cfg(feature = "rtos-trace")]
                     rtos_trace::trace::task_exec_begin(MAC_INDICATION);
-                    self.handle_indication(&mut indication).await;
+                    self.handle_indication(indication).await;
                 }
+                _ => {}
             };
         }
     }
@@ -162,7 +156,7 @@ where
         self.rx_recv.receive().await
     }
 
-    async fn receive_indication(&self, indication: &mut Option<MacIndication>) {
+    async fn receive_indication(&self) -> Option<MacIndication> {
         let mut rx_frame = self.phy_receive().await;
         // TODO: remove this artifact from the old CSMA implementation
         rx_frame.dirty = true;
@@ -172,7 +166,7 @@ where
         self.prepare_ack(&mut rx_frame, &mut ack_frame);
 
         // Acknowledgment is sent while the indication is processed
-        join::join(self.transmit_ack(&mut ack_frame), async {
+        let (_, indication) = join::join(self.transmit_ack(&mut ack_frame), async {
             let frame_type = {
                 let frame = R::RadioFrame::new_checked(&mut rx_frame.buffer[..]).unwrap();
                 let frame = Frame::new(frame.data()).unwrap();
@@ -180,7 +174,7 @@ where
             };
             // TODO: support timestamp
             let timestamp = 0;
-            *indication = match frame_type {
+            match frame_type {
                 FrameType::Data => Some(MacIndication::McpsData(mcps::data::DataIndication {
                     buffer: rx_frame,
                     timestamp,
@@ -195,18 +189,18 @@ where
             }
         })
         .await;
+
+        indication
     }
 
-    async fn handle_indication(&self, indication: &mut Option<MacIndication>) {
-        if let Some(indication) = indication {
-            match indication {
-                MacIndication::McpsData(data_indication) => {
-                    self.mcps_data_indication(data_indication).await;
-                }
-                MacIndication::MlmeBeaconNotify(beacon_notify_indication) => {
-                    self.mlme_beacon_notify_indication(beacon_notify_indication)
-                        .await;
-                }
+    async fn handle_indication(&self, indication: MacIndication) {
+        match indication {
+            MacIndication::McpsData(data_indication) => {
+                self.mcps_data_indication(data_indication).await;
+            }
+            MacIndication::MlmeBeaconNotify(beacon_notify_indication) => {
+                self.mlme_beacon_notify_indication(beacon_notify_indication)
+                    .await;
             }
         }
     }
