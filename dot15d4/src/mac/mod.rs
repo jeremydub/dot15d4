@@ -120,6 +120,9 @@ where
     /// upper layer or receiving a frame/indication from PHY sublayer.
     pub async fn run(&mut self) -> ! {
         loop {
+            // TODO: Why is this required? Are we afraid that this loop's futures
+            //       never pend? (PHY -> MAC does pend, UL -> MAC could receive
+            //       backpressure instead). Looks like unnecessary overhead.
             yield_now().await;
             // Wait until we either have a command to process from the upper layer or we
             // receive an indication from the PHY sublayer

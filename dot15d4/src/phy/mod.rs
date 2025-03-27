@@ -109,6 +109,7 @@ where
         let mut radio_guard = self.radio.lock().await;
 
         loop {
+            // TODO: The subsequent select yields, too, so why this?
             yield_now().await;
 
             match select::select(
