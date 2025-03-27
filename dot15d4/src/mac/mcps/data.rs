@@ -71,7 +71,7 @@ where
 
     pub async fn mcps_data_indication(&self, indication: DataIndication) {
         self.upper_layer
-            .received_mac_indication(crate::mac::primitives::MacIndication::McpsData(
+            .process_mac_indication(crate::mac::primitives::MacIndication::McpsData(
                 indication,
             ))
             .await;

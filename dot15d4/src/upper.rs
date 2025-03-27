@@ -11,7 +11,7 @@ pub trait UpperLayer {
     fn mac_request(&self) -> impl Future<Output = MacRequest>;
     /// Notifies the upper layer that a MAC indication has been received. Holds until
     /// the indication is processed successfully by the upper layer.
-    fn received_mac_indication(&self, indication: MacIndication) -> impl Future<Output = ()>;
+    fn process_mac_indication(&self, indication: MacIndication) -> impl Future<Output = ()>;
     /// Notifies upper layer of an error while handling a MAC request.
     fn error(&self, error: mac::Error) -> impl Future<Output = ()>;
 }
@@ -80,7 +80,7 @@ pub mod tests {
             self.tx.receive().await
         }
 
-        async fn received_mac_indication(&self, indication: MacIndication) {
+        async fn process_mac_indication(&self, indication: MacIndication) {
             self.rx.send(indication);
         }
 
