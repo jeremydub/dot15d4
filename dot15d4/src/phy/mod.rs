@@ -106,20 +106,19 @@ where
     /// or receiving a frame from the radio.
     pub async fn run(&mut self) {
         self.radio.get_mut().enable().await; // Wake up radio
-        let mut rx_frame = FrameBuffer::default();
         let mut radio_guard = self.radio.lock().await;
 
         loop {
             yield_now().await;
 
             match select::select(
-                self.listening(&mut rx_frame, &mut radio_guard),
+                self.listening(&mut radio_guard),
                 self.mac_recv(),
             )
             .await
             {
-                Either::First(_) => {
-                    self.mac_send(core::mem::take(&mut rx_frame)).await;
+                Either::First(rx_frame) => {
+                    self.mac_send(rx_frame).await;
                 }
                 Either::Second(mut tx_frame) => {
                     self.transmit_frame(&mut tx_frame, &mut radio_guard).await;
@@ -141,7 +140,9 @@ where
     }
 
     /// Listen for a frame on the radio
-    async fn listening(&self, frame: &mut FrameBuffer, radio_guard: &mut MutexGuard<'_, R>) {
+    async fn listening(&self, radio_guard: &mut MutexGuard<'_, R>) -> FrameBuffer {
+        let mut frame = FrameBuffer::default();
+
         receive(
             &mut **radio_guard,
             &mut frame.buffer,
@@ -150,6 +151,8 @@ where
             },
         )
         .await;
+
+        frame
     }
 
     /// Transmit the given frame to the radio
