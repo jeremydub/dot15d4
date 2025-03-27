@@ -114,7 +114,7 @@ impl<T> Future for LockFuture<'_, T> {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut mutex_state = self.mutex.state.borrow_mut();
         if mutex_state.locked {
-            // Mutex is locked here, wake the previous task, so it can make progress and we
+            // Mutex is locked here, wake the previous task, so it can make progress, and we
             // do not have to remember it
             let new_waker = cx.waker();
             match &mut mutex_state.waker {

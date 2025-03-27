@@ -99,7 +99,7 @@ impl<const N: usize, T: MacNeighbor> TschSlotframe<N, T> {
         asn % self.size
     }
 
-    /// Return the channal offset for a fiven link at a given ASN
+    /// Return the channel offset for a given link at a given ASN
     /// * `asn` - Absolute slot number
     /// * `link` - Link to consider
     fn channel_offset(&self, asn: AbsoluteSlotNumber, link: TschLink<T>) -> u16 {
@@ -373,7 +373,7 @@ pub mod tests {
         assert!(res.is_ok());
 
         {
-            // Two links for the current ASN, should be link from SF1
+            // Two links for the current ASN, should be a link from SF1
             let slot = schedule.next_slot().unwrap();
             assert_eq!(slot.handle, 1);
         }

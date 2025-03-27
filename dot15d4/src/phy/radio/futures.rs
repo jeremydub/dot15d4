@@ -47,7 +47,7 @@ pub async fn transmit<'task, T: AsMut<[u8]>, R: Radio>(
 ) -> bool {
     let radio = RefCell::new(radio);
     // Should just work as a drop is handled at the end, after the other radio uses
-    let on_drop = OnDrop::new(|| radio.borrow_mut().cancel_current_opperation());
+    let on_drop = OnDrop::new(|| radio.borrow_mut().cancel_current_operation());
 
     let mut radio = radio.borrow_mut();
     unsafe {
@@ -71,7 +71,7 @@ pub async fn receive<'task, R: Radio>(
 ) -> bool {
     let radio = RefCell::new(radio);
     // Should just work as a drop is handled at the end, after the other radio uses
-    let on_drop = OnDrop::new(|| radio.borrow_mut().cancel_current_opperation());
+    let on_drop = OnDrop::new(|| radio.borrow_mut().cancel_current_operation());
 
     let mut radio = radio.borrow_mut();
     unsafe {

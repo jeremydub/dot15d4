@@ -33,7 +33,7 @@ pub trait Radio {
 
     /// Request the radio to go in transmit mode and try to send a frame.
     /// The mutability of the bytes argument is not really to modify the buffer,
-    /// but rather to signify to hand over exclusive ownership. In addition this
+    /// but rather to signify to hand over exclusive ownership. In addition, this
     /// also helps with the easy_dma on the nRF family of chips as the buffer
     /// may not be in flash.
     ///
@@ -48,10 +48,10 @@ pub trait Radio {
 
     /// When working with futures, it is not always guaranteed that a future
     /// will complete. This method must be seen as a notification to the radio
-    /// where it can prepare for this cancelation. This method may not use any
+    /// where it can prepare for this cancellation. This method may not use any
     /// async behavior, as dropping in Rust (when a future is cancelled) can
     /// not be async.
-    fn cancel_current_opperation(&mut self);
+    fn cancel_current_operation(&mut self);
 
     /// Request the radio to transmit the queued frame.
     ///
@@ -308,7 +308,7 @@ pub mod tests {
             inner.has_requested_cca = cfg.cca;
         }
 
-        fn cancel_current_opperation(&mut self) {
+        fn cancel_current_operation(&mut self) {
             self.new_event(TestRadioEvent::CancelCurrentOperation);
         }
 

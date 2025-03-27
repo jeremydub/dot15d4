@@ -6,11 +6,11 @@ use rand_core::RngCore;
 
 pub enum DataError {
     // TODO: not supported
-    TransactionOverlflow,
+    TransactionOverflow,
     // TODO: not supported
     TransactionExpired,
     // TODO: not supported
-    ChannelAccesFailure,
+    ChannelAccessFailure,
     // TODO: not supported
     InvalidAddress,
     // TODO: not supported
@@ -30,7 +30,7 @@ pub struct DataRequest {
 pub struct DataConfirm {
     /// Timestamp of frame transmission
     pub timestamp: u32,
-    /// Wheiter the frame has been acknowledge or not
+    /// Whether the frame has been acknowledged or not
     pub acked: bool,
 }
 

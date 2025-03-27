@@ -123,8 +123,8 @@ where
 
         loop {
             yield_now().await;
-            // Wait until we have a command to process from upper layer or we
-            // receive an indication from PHY sublayer
+            // Wait until we either have a command to process from the upper layer or we
+            // receive an indication from the PHY sublayer
             match select::select(
                 self.upper_layer.mac_request(),
                 self.receive_indication(&mut indication),

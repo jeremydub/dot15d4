@@ -49,8 +49,8 @@ pub struct Sender<'a, T> {
 impl<T> Sender<'_, T> {
     /// Sends a message across the channel. Sending multiple messages before the
     /// Receiver can read them, results in overwriting the previous messages.
-    /// Only the last one will be actually sent. This method returns whether or
-    /// not the previous message was overwritten
+    /// Only the last one will be actually sent. This method returns whether
+    /// the previous message was overwritten
     pub fn send(&self, message: T) -> bool {
         // If the channel is ready, make the message drop
         // Safety: The state is only accessed inside a function body and never across an

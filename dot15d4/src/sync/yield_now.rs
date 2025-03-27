@@ -1,6 +1,6 @@
 use core::{future::poll_fn, task::Poll};
 
-/// Simple function that makes the current task yield immediatly, such that
+/// Simple function that makes the current task yield immediately, such that
 /// other tasks can have the opportunity to make progress
 pub async fn yield_now() {
     let mut has_yielded = false;

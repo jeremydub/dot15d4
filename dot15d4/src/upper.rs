@@ -3,14 +3,14 @@ use core::future::Future;
 use crate::mac::command::MacIndication;
 use crate::mac::{self, MacRequest};
 
-/// This traits provides interactions with upper layer. It allows to abstract
+/// This trait provides interactions with the upper layer. It allows to abstract
 /// over channels in async executors. Should be given as an argument to the
 /// task that will run the network protocol.
 pub trait UpperLayer {
-    /// Waits for upper layer to provide a MAC request to handle.
+    /// Waits for the upper layer to provide a MAC request to handle.
     fn mac_request(&self) -> impl Future<Output = MacRequest>;
-    /// Notifies upper layer a MAC indication has been received. Holds until
-    /// the indication is received successfully by upper layer.
+    /// Notifies the upper layer that a MAC indication has been received. Holds until
+    /// the indication is processed successfully by the upper layer.
     fn received_mac_indication(&self, indication: MacIndication) -> impl Future<Output = ()>;
     /// Notifies upper layer of an error while handling a MAC request.
     fn error(&self, error: mac::Error) -> impl Future<Output = ()>;
