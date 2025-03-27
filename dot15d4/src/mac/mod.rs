@@ -131,7 +131,7 @@ where
             )
             .await
             {
-                Either::First(command) => self.handle_command(command).await,
+                Either::First(request) => self.handle_request(request).await,
                 Either::Second(_) => self.handle_indication(&mut indication).await,
             };
         }
@@ -200,8 +200,8 @@ where
         }
     }
 
-    async fn handle_command(&mut self, command: MacRequest) {
-        match command {
+    async fn handle_request(&mut self, request: MacRequest) {
+        match request {
             MacRequest::McpsDataRequest(mut request) => {
                 // TODO: handle errors with upper layer
                 let _ = self.mcps_data_request(&mut request.buffer).await;
