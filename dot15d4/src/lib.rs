@@ -48,6 +48,9 @@ where
     }
 }
 
+// TODO: The term "Device" is already taken in smoltcp::phy::Device.
+//       What is this conceptually? How does it relate to smoltcp's
+//       concept of devices?
 impl<R, Rng, U, TIMER> Device<R, Rng, U, TIMER>
 where
     R: Radio,
