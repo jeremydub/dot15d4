@@ -1,6 +1,5 @@
-use crate::phy::radio::{Radio, RadioFrame, RadioFrameMut};
+use crate::phy::radio::{Radio, RadioFrameMut};
 use crate::{mac::MacService, phy::FrameBuffer, upper::UpperLayer};
-use dot15d4_frame::Frame;
 use embedded_hal_async::delay::DelayNs;
 use rand_core::RngCore;
 
