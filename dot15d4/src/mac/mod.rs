@@ -1,5 +1,5 @@
 pub mod acknowledgment;
-pub mod command;
+pub mod primitives;
 pub mod constants;
 pub mod mcps;
 pub mod mlme;
@@ -27,7 +27,7 @@ use dot15d4_frame::{Frame, FrameType};
 use embedded_hal_async::delay::DelayNs;
 use rand_core::RngCore;
 
-pub use command::{MacIndication, MacRequest};
+pub use primitives::{MacIndication, MacRequest};
 
 /// MAC-related error propagated to higher layer
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]

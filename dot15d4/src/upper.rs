@@ -1,6 +1,6 @@
 use core::future::Future;
 
-use crate::mac::command::MacIndication;
+use crate::mac::primitives::MacIndication;
 use crate::mac::{self, MacRequest};
 
 /// This trait provides interactions with the upper layer. It allows to abstract

@@ -5,7 +5,7 @@ pub use super::mcps::data::DataRequest;
 use super::mlme::beacon::{BeaconNotifyIndication, BeaconRequest};
 use super::mlme::set::SetRequestAttribute;
 
-/// Enum representing all (currently) supported MAC commands
+/// Enum representing all (currently) supported MAC services request primitives
 pub enum MacRequest {
     McpsDataRequest(DataRequest),
     MlmeBeaconRequest(BeaconRequest),
