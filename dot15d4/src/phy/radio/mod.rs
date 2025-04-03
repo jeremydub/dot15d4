@@ -1,3 +1,5 @@
+#![allow(unexpected_cfgs)]
+
 pub mod futures;
 
 use core::future::Future;
@@ -89,7 +91,7 @@ pub trait TxToken {
         F: FnOnce(&mut [u8]) -> R;
 }
 
-#[cfg(test)]
+#[cfg(all(test, std))]
 pub mod tests {
     use core::panic;
     use std::{

@@ -1,6 +1,12 @@
+#![allow(unexpected_cfgs)]
+
+#[cfg(feature = "std")]
 use core::future::Future;
+#[cfg(feature = "std")]
 use core::task::Poll;
+#[cfg(feature = "std")]
 use core::task::Waker;
+#[cfg(feature = "std")]
 use std::sync::mpsc::RecvTimeoutError;
 
 use embedded_hal_async::delay::DelayNs;
@@ -44,6 +50,7 @@ pub enum StdDelayFuture {
     Finished,
 }
 
+#[cfg(feature = "std")]
 impl StdDelayFuture {
     pub fn new(duration: std::time::Duration) -> Self {
         let now = std::time::Instant::now();
@@ -147,7 +154,7 @@ impl Drop for StdDelayFuture {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, std))]
 mod inner_tests {
     use std::time::{Duration, Instant};
 
