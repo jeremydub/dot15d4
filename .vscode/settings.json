@@ -1,7 +1,8 @@
 {
-  "rust-analyzer.cargo.noDefaultFeatures": true, // remove for testing
-  "rust-analyzer.cargo.allTargets": false, // remove for testing
-  "rust-analyzer.cargo.target": "thumbv7em-none-eabihf", // remove for testing
-  "rust-analyzer.cargo.features": ["log", "rtos-trace"],
+  //"rust-analyzer.cargo.noDefaultFeatures": true, // remove for testing
+  //"rust-analyzer.cargo.allTargets": false, // remove for testing
+  //"rust-analyzer.cargo.target": "thumbv7em-none-eabihf", // remove for testing
+  "rust-analyzer.cargo.features": ["log", "rtos-trace", "with_security"], // test should w/ and w/o "with_security" feature
+  //"rust-analyzer.cargo.features": ["log", "rtos-trace"],
   "rust-analyzer.linkedProjects": ["dot15d4-frame2/Cargo.toml"]
 }
