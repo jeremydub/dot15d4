@@ -69,7 +69,7 @@ impl<T> Mutex<T> {
     }
 }
 
-/// Represesnts current exclusive access to the resource protected by a mutex
+/// Represents current exclusive access to the resource protected by a mutex
 pub struct MutexGuard<'a, T> {
     mutex: &'a Mutex<T>,
 }

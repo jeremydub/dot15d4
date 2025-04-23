@@ -9,10 +9,6 @@ pub mod tsch;
 pub mod utils;
 
 use crate::{
-    phy::{
-        radio::{Radio, RadioFrame, RadioFrameMut},
-        FrameBuffer,
-    },
     sync::{
         channel::{Receiver, Sender},
         join,
@@ -23,8 +19,14 @@ use crate::{
     },
     upper::UpperLayer,
 };
-use dot15d4_frame::{Frame, FrameType};
+use dot15d4_frame3::{
+    driver::{DriverConfig, DriverFrame, Rx, Tx},
+    frame_control::FrameType,
+    mpdu::{MpduFrame, IMM_ACK_BUF_LEN},
+};
 use embedded_hal_async::delay::DelayNs;
+use mcps::data::DataIndication;
+use mlme::beacon::BeaconNotifyIndication;
 use rand_core::RngCore;
 
 #[cfg(feature = "rtos-trace")]
@@ -56,44 +58,36 @@ pub enum Error {
 /// Structure handling MAC sublayer services such as MLME and MCPS. This runs the main event loop
 /// that handles interactions between an upper layer and the PHY sublayer. It uses signals to
 /// communicate with the upper layer and with the PHY sublayer.
-pub struct MacService<'a, Rng, U: UpperLayer, TIMER, R> {
+pub struct MacService<'svc, Rng, U: UpperLayer, TIMER, Config: DriverConfig> {
     /// Pseudo-random number generator
-    rng: &'a mut Mutex<Rng>,
+    rng: &'svc mut Mutex<Rng>,
     /// Timer enabling delays operation
     timer: TIMER,
     /// Upper layer handler from which MAC commands are received and to which
     /// frames and responses are passed.
-    upper_layer: &'a mut U,
-    /// Signal for receiving command from the upper layer
-    rx_recv: Receiver<'a, FrameBuffer>,
-    /// Signal for sending frame to the PHY sublayer
-    tx_send: Sender<'a, FrameBuffer>,
-    /// Signal used for end of transmission of a frame submitted to the PHY
-    /// sublayer.
-    tx_done: Receiver<'a, ()>,
+    upper_layer: U,
+    /// Signal to receive a primitive from the upper layer
+    rx_recv: Receiver<'svc, DriverFrame<'svc, Config, Rx>>, // TODO: Fix buffer lifetime.
+    /// Signal for sending a frame to the PHY sublayer
+    tx_send: Sender<'svc, DriverFrame<'svc, Config, Tx>>, // TODO: Fix buffer lifetime.
+    // TODO: Move to mutable "inner". Make inner a state machine?
     /// PAN Information Base
     pub pib: pib::Pib,
-    /// Phantom data used for associating Radio type in order to extract the
-    /// data from a radio buffer
-    _phantom: core::marker::PhantomData<R>,
 }
 
-impl<'a, Rng, U, TIMER, R> MacService<'a, Rng, U, TIMER, R>
+impl<'svc, Rng, U, TIMER, Config> MacService<'svc, Rng, U, TIMER>
 where
     Rng: RngCore,
     U: UpperLayer,
-    R: Radio,
-    for<'b> R::RadioFrame<&'b mut [u8]>: RadioFrameMut<&'b mut [u8]>,
-    for<'b> R::TxToken<'b>: From<&'b mut [u8]>,
+    Config: DriverConfig,
 {
     /// Creates a new [`MacService<Rng, U, TIMER, R>`].
     pub fn new(
-        rng: &'a mut Mutex<Rng>,
-        upper_layer: &'a mut U,
+        rng: &'svc mut Mutex<Rng>,
+        upper_layer: U,
         timer: TIMER,
-        rx_recv: Receiver<'a, FrameBuffer>,
-        tx_send: Sender<'a, FrameBuffer>,
-        tx_done: Receiver<'a, ()>,
+        rx_recv: Receiver<'svc, DriverFrame<'svc, Config, Rx>>,
+        tx_send: Sender<'svc, DriverFrame<'svc, Config, Tx>>,
     ) -> Self {
         Self {
             rng,
@@ -101,26 +95,22 @@ where
             timer,
             rx_recv,
             tx_send,
-            tx_done,
             pib: pib::Pib::default(),
-            _phantom: Default::default(),
         }
     }
 }
 
 #[allow(dead_code)]
-impl<Rng, U, TIMER, R> MacService<'_, Rng, U, TIMER, R>
+impl<'svc, Rng, U, TIMER, Config> MacService<'svc, Rng, U, TIMER>
 where
     Rng: RngCore,
     U: UpperLayer,
     TIMER: DelayNs + Clone,
-    R: Radio,
-    for<'b> R::RadioFrame<&'b mut [u8]>: RadioFrameMut<&'b mut [u8]>,
-    for<'b> R::TxToken<'b>: From<&'b mut [u8]>,
+    Config: DriverConfig,
 {
     /// Run the main event loop used by the MAC sublayer for its operation. For
-    /// now, the loop waits for either receiving a command from
-    /// upper layer or receiving a frame/indication from PHY sublayer.
+    /// now, the loop waits for either receiving a command from the upper layer
+    /// or a frame/indication from the PHY sublayer.
     pub async fn run(&mut self) -> ! {
         loop {
             yield_now().await;
@@ -145,46 +135,42 @@ where
     /// Submit a buffer to the PHY sublayer via a signal that is received by
     /// the PHY task. Wait for the frame to be fully transmitted before
     /// returning.
-    async fn phy_send(&self, tx: FrameBuffer) {
+    async fn phy_send(&self, tx: DriverFrame<'svc, Config, Tx>) {
         self.tx_send.send_async(tx).await;
-        self.tx_done.receive().await;
     }
 
     /// Waits for a frame to be received from the PHY sublayer's task via a
     /// signal.
-    async fn phy_receive(&self) -> FrameBuffer {
+    async fn phy_receive(&self) -> DriverFrame<'svc, Config, Rx> {
         self.rx_recv.receive().await
     }
 
-    async fn receive_indication(&self) -> Option<MacIndication> {
-        let mut rx_frame = self.phy_receive().await;
-        // TODO: remove this artifact from the old CSMA implementation
-        rx_frame.dirty = true;
+    async fn receive_indication(&self) -> Option<MacIndication<'svc>> {
+        static mut ACK_BUFFER: [u8; IMM_ACK_BUF_LEN] = [0; IMM_ACK_BUF_LEN];
+
+        let frame = self.phy_receive().await;
+        let mut mpdu = MpduFrame::parse(frame);
 
         // Optional ack frame that is used if required
-        let mut ack_frame = None;
-        self.prepare_ack(&mut rx_frame, &mut ack_frame);
+        // SAFETY: We prepare and transmit the ack frame sequentially from a
+        //         single executor.
+        let ack_mpdu = unsafe { self.prepare_ack(&mut mpdu, &mut ACK_BUFFER) };
 
         // Acknowledgment is sent while the indication is processed
-        let (_, indication) = join::join(self.transmit_ack(&mut ack_frame), async {
-            let frame_type = {
-                let frame = R::RadioFrame::new_checked(&mut rx_frame.buffer[..]).unwrap();
-                let frame = Frame::new(frame.data()).unwrap();
-                frame.frame_control().frame_type()
-            };
+        let (_, indication) = join::join(self.transmit_ack(ack_mpdu), async {
+            let frame_type = mpdu.frame_control().frame_type();
             // TODO: support timestamp
             let timestamp = 0;
             match frame_type {
-                FrameType::Data => Some(MacIndication::McpsData(mcps::data::DataIndication {
-                    buffer: rx_frame,
-                    timestamp,
-                })),
-                FrameType::Beacon => Some(MacIndication::MlmeBeaconNotify(
-                    mlme::beacon::BeaconNotifyIndication {
-                        buffer: rx_frame,
+                FrameType::Data => {
+                    Some(MacIndication::McpsData(DataIndication { mpdu, timestamp }))
+                }
+                FrameType::Beacon => {
+                    Some(MacIndication::MlmeBeaconNotify(BeaconNotifyIndication {
+                        mpdu,
                         timestamp,
-                    },
-                )),
+                    }))
+                }
                 _ => None,
             }
         })
@@ -193,7 +179,8 @@ where
         indication
     }
 
-    async fn handle_indication(&self, indication: MacIndication) {
+    // TODO: Move to mutable "inner".
+    async fn handle_indication(&self, indication: MacIndication<'svc>) {
         match indication {
             MacIndication::McpsData(data_indication) => {
                 self.mcps_data_indication(data_indication).await;
@@ -205,11 +192,12 @@ where
         }
     }
 
-    async fn handle_request(&mut self, request: MacRequest) {
+    // TODO: Move to mutable "inner".
+    async fn handle_request(&mut self, request: MacRequest<'svc>) {
         match request {
-            MacRequest::McpsDataRequest(mut request) => {
+            MacRequest::McpsDataRequest(request) => {
                 // TODO: handle errors with upper layer
-                let _ = self.mcps_data_request(&mut request.buffer).await;
+                let _ = self.mcps_data_request(request.mpdu).await;
             }
             MacRequest::MlmeBeaconRequest(beacon_request) => {
                 // TODO: handle errors with upper layer
@@ -217,9 +205,8 @@ where
             }
             MacRequest::MlmeSetRequest(set_request_attribute) => {
                 // TODO: handle errors with upper layer
-                let _ = self.mlme_set_request(set_request_attribute).await;
+                let _ = self.mlme_set_request(&set_request_attribute).await;
             }
-            MacRequest::EmptyRequest => {}
         }
     }
 }

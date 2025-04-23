@@ -1,5 +1,3 @@
-#![allow(unexpected_cfgs)]
-
 #[cfg(feature = "std")]
 use core::future::Future;
 #[cfg(feature = "std")]
@@ -154,14 +152,18 @@ impl Drop for StdDelayFuture {
     }
 }
 
-#[cfg(all(test, std))]
+#[cfg(test)]
 mod inner_tests {
+    #[cfg(std)]
     use std::time::{Duration, Instant};
 
+    #[cfg(std)]
     use embedded_hal_async::delay::DelayNs;
 
+    #[cfg(std)]
     use super::StdDelay;
 
+    #[cfg(std)]
     #[pollster::test]
     pub async fn test_std_delay_future() {
         let mut delay = StdDelay::default();

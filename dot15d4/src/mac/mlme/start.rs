@@ -1,5 +1,5 @@
-use crate::phy::radio::{Radio, RadioFrameMut};
 use crate::upper::UpperLayer;
+use dot15d4_frame3::driver::DriverConfig;
 use embedded_hal_async::delay::DelayNs;
 use rand_core::RngCore;
 
@@ -8,14 +8,12 @@ use super::MacService;
 struct StartConfirm {}
 
 #[allow(dead_code)]
-impl<Rng, U, TIMER, R> MacService<'_, Rng, U, TIMER, R>
+impl<Rng, U, TIMER, Config> MacService<'_, Rng, U, TIMER, Config>
 where
     Rng: RngCore,
     U: UpperLayer,
     TIMER: DelayNs + Clone,
-    R: Radio,
-    for<'a> R::RadioFrame<&'a mut [u8]>: RadioFrameMut<&'a mut [u8]>,
-    for<'a> R::TxToken<'a>: From<&'a mut [u8]>,
+    Config: DriverConfig,
 {
     /// Used by PAN coordinator to initiate a new PAN or to begin using a new
     /// configuration. Also used by a device already associated with an

@@ -29,13 +29,13 @@ pub mod tests {
     }
 
     #[derive(Default)]
-    pub struct TestUpperLayerChannel {
-        pub tx: Channel<MacRequest>,
-        pub rx: Channel<MacIndication>,
+    pub struct TestUpperLayerChannel<'buffer> {
+        pub tx: Channel<MacRequest<'buffer>>,
+        pub rx: Channel<MacIndication<'buffer>>,
         pub errors: Channel<mac::Error>,
     }
 
-    impl TestUpperLayerChannel {
+    impl<'buffer> TestUpperLayerChannel<'buffer> {
         pub fn new() -> Self {
             Self {
                 tx: Channel::new(),
@@ -44,7 +44,9 @@ pub mod tests {
             }
         }
 
-        pub fn split(&mut self) -> (TestUpperLayer<'_>, TestUpperLayerMonitor<'_>) {
+        pub fn split(
+            &'buffer mut self,
+        ) -> (TestUpperLayer<'buffer>, TestUpperLayerMonitor<'buffer>) {
             let (tx_send, tx_recv) = self.tx.split();
             let (rx_send, rx_recv) = self.rx.split();
             let (errors_send, errors_recv) = self.errors.split();
@@ -63,16 +65,16 @@ pub mod tests {
         }
     }
 
-    pub struct TestUpperLayerMonitor<'a> {
-        pub tx: Sender<'a, MacRequest>,
-        pub rx: Receiver<'a, MacIndication>,
-        pub errors: Receiver<'a, mac::Error>,
+    pub struct TestUpperLayerMonitor<'buffer> {
+        pub tx: Sender<'buffer, MacRequest<'buffer>>,
+        pub rx: Receiver<'buffer, MacIndication<'buffer>>,
+        pub errors: Receiver<'buffer, mac::Error>,
     }
 
-    pub struct TestUpperLayer<'a> {
-        tx: Receiver<'a, MacRequest>,
-        rx: Sender<'a, MacIndication>,
-        errors: Sender<'a, mac::Error>,
+    pub struct TestUpperLayer<'buffer> {
+        tx: Receiver<'buffer, MacRequest<'buffer>>,
+        rx: Sender<'buffer, MacIndication<'buffer>>,
+        errors: Sender<'buffer, mac::Error>,
     }
 
     impl UpperLayer for TestUpperLayer<'_> {
@@ -80,7 +82,7 @@ pub mod tests {
             self.tx.receive().await
         }
 
-        async fn process_mac_indication(&self, indication: MacIndication) {
+        async fn process_mac_indication(&self, indication: MacIndication<'_>) {
             self.rx.send(indication);
         }
 

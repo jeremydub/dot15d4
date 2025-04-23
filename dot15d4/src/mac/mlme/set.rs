@@ -1,5 +1,5 @@
-use crate::phy::radio::{Radio, RadioFrameMut};
 use crate::upper::UpperLayer;
+use dot15d4_frame3::driver::DriverConfig;
 use embedded_hal_async::delay::DelayNs;
 use rand_core::RngCore;
 
@@ -11,21 +11,20 @@ pub enum SetError {
 
 /// Attributes that may be written by an upper layer
 pub enum SetRequestAttribute {
-    PanId(u16),
-    ShortAddress(u16),
-    ExtendedAddress([u8; 8]),
-    AssociationPermit(bool),
+    // IEEE 802.15.4-2020, section 8.4.3.1, table 8-94
+    MacExtendedAddress([u8; 8]),
+    MacAssociationPermit(bool),
+    MacPanId(u16),
+    MacShortAddress(u16),
 }
 
 #[allow(dead_code)]
-impl<Rng, U, TIMER, R> MacService<'_, Rng, U, TIMER, R>
+impl<Rng, U, TIMER, Config> MacService<'_, Rng, U, TIMER, Config>
 where
     Rng: RngCore,
     U: UpperLayer,
     TIMER: DelayNs + Clone,
-    R: Radio,
-    for<'a> R::RadioFrame<&'a mut [u8]>: RadioFrameMut<&'a mut [u8]>,
-    for<'a> R::TxToken<'a>: From<&'a mut [u8]>,
+    Config: DriverConfig,
 {
     /// Used by the next higher layer to attempt to write the given value to
     /// the indicated MAC PIB attribute.
@@ -33,18 +32,18 @@ where
     /// * `attribute` - Attribute to write
     pub(crate) async fn mlme_set_request(
         &mut self,
-        attribute: SetRequestAttribute,
+        attribute: &SetRequestAttribute,
     ) -> Result<(), SetError> {
         match attribute {
-            SetRequestAttribute::PanId(pan_id) => self.pib.pan_id = pan_id,
-            SetRequestAttribute::ShortAddress(short_address) => {
-                self.pib.short_address = short_address
+            SetRequestAttribute::MacPanId(pan_id) => self.pib.pan_id = *pan_id,
+            SetRequestAttribute::MacShortAddress(short_address) => {
+                self.pib.short_address = *short_address
             }
-            SetRequestAttribute::ExtendedAddress(extended_address) => {
-                self.pib.extended_address = Some(extended_address)
+            SetRequestAttribute::MacExtendedAddress(extended_address) => {
+                self.pib.extended_address = Some(*extended_address)
             }
-            SetRequestAttribute::AssociationPermit(association_permit) => {
-                self.pib.association_permit = association_permit
+            SetRequestAttribute::MacAssociationPermit(association_permit) => {
+                self.pib.association_permit = *association_permit
             }
         }
         Ok(())

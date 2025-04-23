@@ -1,5 +1,3 @@
-use dot15d4_frame::{TschLinkOption, TschTimeslotTimings};
-
 use crate::mac::neighbors::MacNeighbor;
 
 use super::asn::AbsoluteSlotNumber;

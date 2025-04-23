@@ -1,5 +1,6 @@
-use crate::phy::radio::{Radio, RadioFrameMut};
-use crate::{mac::MacService, phy::FrameBuffer, upper::UpperLayer};
+use crate::{mac::MacService, upper::UpperLayer};
+use dot15d4_frame3::driver::{Rx, Tx};
+use dot15d4_frame3::mpdu::MpduFrame;
 use embedded_hal_async::delay::DelayNs;
 use rand_core::RngCore;
 
@@ -22,8 +23,8 @@ pub enum DataError {
     InvalidParameter,
 }
 
-pub struct DataRequest {
-    pub buffer: FrameBuffer,
+pub struct DataRequest<'mpdu> {
+    pub mpdu: MpduFrame<'mpdu, Tx>,
 }
 
 pub struct DataConfirm {
@@ -33,31 +34,27 @@ pub struct DataConfirm {
     pub acked: bool,
 }
 
-#[derive(Default)]
-pub struct DataIndication {
-    /// buffer containing the received frame
-    pub buffer: FrameBuffer,
+pub struct DataIndication<'mpdu> {
+    /// buffer containing the received frame payload
+    pub mpdu: MpduFrame<'mpdu, Rx>,
     /// Timestamp of frame reception
     pub timestamp: u32,
 }
 
-impl<Rng, U, TIMER, R> MacService<'_, Rng, U, TIMER, R>
+impl<'svc, Rng, U, TIMER> MacService<'svc, Rng, U, TIMER>
 where
     Rng: RngCore,
     U: UpperLayer,
     TIMER: DelayNs + Clone,
-    R: Radio,
-    for<'a> R::RadioFrame<&'a mut [u8]>: RadioFrameMut<&'a mut [u8]>,
-    for<'a> R::TxToken<'a>: From<&'a mut [u8]>,
 {
     /// Requests the transfer of data to another device
     pub async fn mcps_data_request(
         &self,
-        frame: &mut FrameBuffer,
+        mut mpdu: MpduFrame<'svc, Tx>,
     ) -> Result<DataConfirm, DataError> {
-        let sequence_number = Self::set_ack(frame);
+        let sequence_number = Self::set_ack(&mut mpdu);
 
-        self.phy_send(core::mem::take(frame)).await;
+        self.phy_send(mpdu.driver_frame()).await;
         let acked = match sequence_number {
             Some(sequence_number) => self.wait_for_ack(sequence_number).await,
             _ => true,
@@ -69,11 +66,9 @@ where
         })
     }
 
-    pub async fn mcps_data_indication(&self, indication: DataIndication) {
+    pub async fn mcps_data_indication(&self, indication: DataIndication<'svc>) {
         self.upper_layer
-            .process_mac_indication(crate::mac::primitives::MacIndication::McpsData(
-                indication,
-            ))
+            .process_mac_indication(crate::mac::primitives::MacIndication::McpsData(indication))
             .await;
     }
 }

@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 pub use customizable::*;
 
-use crate::phy::constants::{CCA_TIME, TURNAROUND_TIME};
+use crate::radio::constants::{CCA_TIME, TURNAROUND_TIME};
 pub const BROADCAST_PAN_ID: u16 = 0xffff;
 // Constants of section 8.4.2, Table 8-93, MAC constants
 /// The number of symbols forming a superframe slot when the superframe order is
@@ -38,7 +38,7 @@ pub const RCCN_BASE_SLOT_DURATION: u32 = 60;
 #[cfg(test)]
 mod customizable {
     #![allow(dead_code)]
-    use crate::{phy::constants::SYMBOL_RATE_INV_US, time::Duration};
+    use crate::{radio::constants::SYMBOL_RATE_INV_US, time::Duration};
 
     // XXX These are just random numbers I picked by fair dice roll; what should
     // they be?
