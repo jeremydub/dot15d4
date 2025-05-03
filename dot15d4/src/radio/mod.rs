@@ -12,18 +12,16 @@ use core::{cell::RefCell, marker::PhantomData};
 
 use dot15d4_frame3::driver::{DriverConfig, DriverFrame, Rx, Tx};
 use driver::RadioDriver;
-use generic_array::GenericArray;
 
-use crate::{
-    select::select,
-    sync::{
-        channel::{Receiver, Sender},
-        yield_now::yield_now,
-        Either,
-    },
-};
+use crate::sync::channel::Receiver;
 
 use self::config::{RxConfig, TxConfig};
+
+/// Placeholder for future radio task abstraction.
+enum DriverTask<'buffer, Config: DriverConfig> {
+    TxFrame(DriverFrame<'buffer, Config, Tx>),
+    RxFrame(DriverFrame<'buffer, Config, Rx>),
+}
 
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -36,13 +34,23 @@ pub enum Error {
     RadioError,
 }
 
+// TODO: Make this configurable.
+pub const DRIVER_CHANNEL_CAPACITY: usize = 2;
+pub const DRIVER_CHANNEL_BACKLOG: usize = 2;
+
 /// Structure managing the driver. Knows about and manages driver capabilities
 /// and exposes a unified API to the MAC service.
 pub struct DriverCoprocessor<'radio, Config: DriverConfig, R: RadioDriver<Config>> {
+    // TODO: Consolidate interior mutability in an inner struct.
     radio: RefCell<R>,
-    tx_recv: Receiver<'radio, DriverFrame<'radio, Config, Tx>>, // TODO: Fix Tx buffer lifetime.
-    rx_buf: GenericArray<u8, Config::MaxFrameLen>,
-    rx_send: Sender<'radio, DriverFrame<'radio, Config, Rx>>, // TODO: Fix Rx buffer lifetime.
+    mac: RefCell<
+        Receiver<
+            'radio,
+            DriverTask<'radio, Config>,
+            DRIVER_CHANNEL_CAPACITY,
+            DRIVER_CHANNEL_BACKLOG,
+        >,
+    >,
     /// PAN Information Base
     pub pib: pib::Pib,
     driver_config: PhantomData<Config>,
@@ -52,14 +60,16 @@ impl<'radio, Config: DriverConfig, R: RadioDriver<Config>> DriverCoprocessor<'ra
     /// Creates a new [`PhyService<Config, R>`].
     pub fn new(
         radio: R,
-        tx_recv: Receiver<'radio, DriverFrame<'radio, Config, Tx>>,
-        rx_send: Sender<'radio, DriverFrame<'radio, Config, Rx>>,
+        mac: Receiver<
+            'radio,
+            DriverTask<'radio, Config>,
+            DRIVER_CHANNEL_CAPACITY,
+            DRIVER_CHANNEL_BACKLOG,
+        >,
     ) -> Self {
         Self {
             radio: RefCell::new(radio),
-            tx_recv,
-            rx_buf: Default::default(),
-            rx_send,
+            mac: RefCell::new(mac),
             pib: pib::Pib::default(),
             driver_config: PhantomData,
         }
@@ -68,41 +78,27 @@ impl<'radio, Config: DriverConfig, R: RadioDriver<Config>> DriverCoprocessor<'ra
     /// Run the main event loop used by the PHY sublayer for its operation. For
     /// now, the loop waits for either receiving a frame from the MAC sublayer
     /// or receiving a frame from the radio.
-    pub async fn run(&mut self) -> ! {
+    pub async fn run(&self) -> ! {
         self.radio.borrow_mut().enable().await; // Wake up radio
 
+        let mut mac = self.mac.borrow_mut();
         loop {
-            yield_now().await;
-
-            // TODO: Describe, analyze, optimize and measure alternative
-            //       allocation strategies (stack, heap, static, object
-            //       allocator, ...).
-            let mut driver_frame = DriverFrame::new(&mut self.rx_buf);
-
-            match select(self.rx_frame(&mut driver_frame), self.mac_recv()).await {
-                Either::First(_) => {
-                    #[cfg(feature = "rtos-trace")]
-                    rtos_trace::trace::task_exec_begin(PHY_RX);
-                    self.mac_send(driver_frame).await;
-                }
-                Either::Second(mut tx_frame) => {
+            let (slot, msg) = mac.wait_for_msg().await;
+            match msg {
+                DriverTask::TxFrame(mut tx_frame) => {
                     #[cfg(feature = "rtos-trace")]
                     rtos_trace::trace::task_exec_begin(PHY_RX);
                     self.tx_frame(&mut tx_frame).await;
                 }
-            };
+                DriverTask::RxFrame(mut rx_frame) => {
+                    #[cfg(feature = "rtos-trace")]
+                    rtos_trace::trace::task_exec_begin(PHY_TX);
+                    self.rx_frame(&mut rx_frame).await;
+                }
+            }
+            mac.received(slot);
         }
         //
-    }
-
-    /// Send a frame back to the MAC sublayer.
-    async fn mac_send(&self, rx: DriverFrame<'radio, Config, Rx>) {
-        self.rx_send.send_async(rx).await;
-    }
-
-    /// Wait for a frame from the MAC sublayer to be transmitted.
-    async fn mac_recv(&self) -> DriverFrame<'radio, Config, Tx> {
-        self.tx_recv.receive().await
     }
 
     /// Listen for a frame on the radio

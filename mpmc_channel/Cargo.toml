@@ -1,0 +1,19 @@
+[package]
+edition = "2021"
+name = "mpsc_channel"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+bitmaps = "3.2"
+embassy-sync = { version = "0.6", features = ["log"] }
+embassy-executor = { version = "0.7", features = [
+    "arch-std",
+    "executor-thread",
+    "log",
+] }
+embassy-time = { version = "0.4", features = ["log", "std"] }
+env_logger = "0.11"
+heapless = "0.8"
+log = "0.4"
+static_cell = "2.1"
