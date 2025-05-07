@@ -1,4 +1,3 @@
-use crate::phy::radio::{Radio, RadioFrameMut};
 use crate::{mac::pib, upper::UpperLayer};
 use embedded_hal_async::delay::DelayNs;
 use rand_core::RngCore;
@@ -11,14 +10,11 @@ pub struct ResetConfirm {
 }
 
 #[allow(dead_code)]
-impl<Rng, U, TIMER, R> MacService<'_, Rng, U, TIMER, R>
+impl<Rng, U, TIMER> MacService<'_, Rng, U, TIMER>
 where
     Rng: RngCore,
     U: UpperLayer,
     TIMER: DelayNs + Clone,
-    R: Radio,
-    for<'a> R::RadioFrame<&'a mut [u8]>: RadioFrameMut<&'a mut [u8]>,
-    for<'a> R::TxToken<'a>: From<&'a mut [u8]>,
 {
     /// Used by the next higher layer to request a reset operation that
     /// involves resetting the PAN Information Base

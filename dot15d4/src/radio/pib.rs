@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+// TODO: Unify this with the MAC PIB.
 /// PAN Information Base (PIB) specified by PHY sublayer
 pub struct Pib {
     /// The RF channel to use for all following

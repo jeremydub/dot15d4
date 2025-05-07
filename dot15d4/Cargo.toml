@@ -9,7 +9,11 @@ categories = ["embedded", "network-programming", "no-std"]
 keywords = ["ieee802154", "WPAN", "smoltcp"]
 
 [dependencies]
-dot15d4-frame = { version = "0.1.2", path = "../dot15d4-frame" }
+dot15d4-frame3 = { version = "0.0.1", path = "../dot15d4-frame3" }
+
+bitmaps = { version = "3.2", default-features = false }
+typenum = "1.18"
+generic-array = "1.2"
 
 log = { version = "0.4.21", optional = true }
 defmt = { version = "0.3", optional = true }

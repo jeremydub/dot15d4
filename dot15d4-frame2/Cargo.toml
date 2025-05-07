@@ -1,0 +1,22 @@
+[package]
+name = "dot15d4-frame2"
+version = "0.0.1"
+edition = "2021"
+authors = ["Florian Grandel <fgrandel@code-for-humans.de>"]
+repository = "https://github.com/thvdveld/dot15d4"
+description = "Frame parsing and building for the dot15d4 crate"
+license = "MIT OR Apache-2.0"
+categories = ["embedded", "network-programming", "no-std"]
+keywords = ["ieee802154", "wpan", "smoltcp"]
+
+[dependencies]
+bitfield-struct = "0.10"
+bytemuck = { version = "1.22", features = ["derive"] }
+byteorder = { version = "1.5", default-features = false }
+crc = "3.2"
+generic-array = "1.2"
+typenum = "1.18"
+
+[features]
+with_security = []
+default = ["with_security"]
