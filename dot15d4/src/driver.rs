@@ -481,7 +481,7 @@ where
 
         match rx_driver
             .schedule_tx(tx_ack_task, Ifs::Aifs, true)
-            .execute_transition()
+            .complete_and_transition()
             .await
         {
             // CRC ok: Send the received frame back to the client and update the
@@ -590,7 +590,7 @@ where
                     let tx_task_ifs = Ifs::from_mpdu_length(tx_task.radio_frame.sdu_length().get());
                     match rx_driver
                         .schedule_tx(tx_task, next_task_ifs, false)
-                        .execute_transition()
+                        .complete_and_transition()
                         .await
                     {
                         CompletedRadioTransition::Entered(transition_result) => {
@@ -634,7 +634,7 @@ where
                     // scheduling RX back-to-back is ok.
                     match rx_driver
                         .schedule_rx(rx_task, false)
-                        .execute_transition()
+                        .run_and_transition()
                         .await
                     {
                         CompletedRadioTransition::Entered(transition_result) => {
@@ -664,7 +664,7 @@ where
                     },
                     true,
                 )
-                .execute_transition()
+                .complete_and_transition()
                 .await
             {
                 CompletedRadioTransition::Entered(transition_result) => {
@@ -726,7 +726,7 @@ where
         };
         match rx_driver
             .schedule_rx(rx_task, false)
-            .execute_transition()
+            .run_and_transition()
             .await
         {
             CompletedRadioTransition::Entered(transition_result) => {
@@ -813,7 +813,7 @@ where
                 let tx_task_ifs = Ifs::from_mpdu_length(tx_task.radio_frame.sdu_length().get());
                 match rx_driver
                     .schedule_tx(tx_task, Ifs::None, false)
-                    .execute_transition()
+                    .complete_and_transition()
                     .await
                 {
                     CompletedRadioTransition::Entered(transition_result) => {
@@ -876,7 +876,7 @@ where
                 };
                 match rx_driver
                     .schedule_off(off_task, false)
-                    .execute_transition()
+                    .complete_and_transition()
                     .await
                 {
                     CompletedRadioTransition::Entered(transition_result) => {
@@ -955,7 +955,7 @@ where
                     let tx_task_ifs = Ifs::from_mpdu_length(tx_task.radio_frame.sdu_length().get());
                     match tx_driver
                         .schedule_tx(tx_task, next_task_ifs)
-                        .execute_transition()
+                        .run_and_transition()
                         .await
                     {
                         CompletedRadioTransition::Entered(transition_result) => {
@@ -1006,7 +1006,7 @@ where
                 DrvSvcRequest::Rx(rx_task) => {
                     match tx_driver
                         .schedule_rx(rx_task, next_task_ifs)
-                        .execute_transition()
+                        .complete_and_transition()
                         .await
                     {
                         CompletedRadioTransition::Entered(transition_result) => {
@@ -1034,7 +1034,7 @@ where
                     .schedule_off(RadioTaskOff {
                         at: Timestamp::BestEffort,
                     })
-                    .execute_transition()
+                    .complete_and_transition()
                     .await
                 {
                     CompletedRadioTransition::Entered(transition_result) => {
@@ -1074,7 +1074,7 @@ where
         };
         let (mut rx_driver, tx_radio_frame) = match tx_driver
             .schedule_rx(rx_ack_task, Ifs::None)
-            .execute_transition()
+            .complete_and_transition()
             .await
         {
             CompletedRadioTransition::Entered(transition_result) => {
@@ -1148,7 +1148,11 @@ where
                 DrvSvcRequest::Tx(tx_task) => {
                     let tx_task_ack_seq_nr = tx_task.radio_frame.ack_seq_num();
                     let tx_task_ifs = Ifs::from_mpdu_length(tx_task.radio_frame.sdu_length().get());
-                    match off_driver.schedule_tx(tx_task).execute_transition().await {
+                    match off_driver
+                        .schedule_tx(tx_task)
+                        .complete_and_transition()
+                        .await
+                    {
                         CompletedRadioTransition::Entered(transition_result) => {
                             let tx_driver = transition_result.this_state;
                             break (
@@ -1170,7 +1174,11 @@ where
                     }
                 }
                 DrvSvcRequest::Rx(rx_task) => {
-                    match off_driver.schedule_rx(rx_task).execute_transition().await {
+                    match off_driver
+                        .schedule_rx(rx_task)
+                        .complete_and_transition()
+                        .await
+                    {
                         CompletedRadioTransition::Entered(transition_result) => {
                             let rx_driver = transition_result.this_state;
                             break (DriverState::Rx(rx_driver), next_response_token);
