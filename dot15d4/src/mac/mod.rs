@@ -402,9 +402,8 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
             MacSvcTaskResult::DataRequest(task_result) => {
                 let recovered_radio_frame = match task_result {
                     DataRequestResult::Sent(recovered_radio_frame) => recovered_radio_frame,
-                    DataRequestResult::CcaBusy(unsent_radio_frame)
-                    | DataRequestResult::Nack(unsent_radio_frame) => {
-                        // TODO: CSMA/CA or Retry.
+                    DataRequestResult::ChannelAccessFailure(unsent_radio_frame)
+                    | DataRequestResult::NoAck(unsent_radio_frame) => {
                         unsent_radio_frame.forget_size::<RadioDriverImpl>()
                     }
                 };

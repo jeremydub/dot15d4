@@ -1,10 +1,9 @@
 #![allow(dead_code)]
-use core::{marker::PhantomData, num::NonZero};
+use core::{cell::RefCell, marker::PhantomData, num::NonZero};
 
 #[cfg(feature = "rtos-trace")]
 use crate::trace::{
-    MAC_INDICATION, MAC_REQUEST, RX_CRC_ERROR, RX_FRAME, RX_INVALID, RX_WINDOW_ENDED, TX_CCABUSY,
-    TX_FRAME, TX_NACK,
+    MAC_INDICATION, MAC_REQUEST, RX_CRC_ERROR, RX_FRAME, RX_INVALID, RX_WINDOW_ENDED,
 };
 use crate::{
     driver::{
@@ -13,31 +12,17 @@ use crate::{
             RadioFrameUnsized,
         },
         radio::DriverConfig,
-        tasks::{RxError, RxResult, Timestamp, TxError, TxResult},
-        DrvSvcRequest, DrvSvcResponse, DrvSvcTaskError, DrvSvcTaskRx, DrvSvcTaskTx,
+        tasks::{RxError, RxResult, Timestamp},
+        DrvSvcRequest, DrvSvcResponse, DrvSvcTaskError, DrvSvcTaskRx,
     },
-    mac::{frame::mpdu::MpduFrame, task::*, MacBufferAllocator},
+    mac::{
+        frame::mpdu::MpduFrame,
+        task::*,
+        transmission::{TransmissionResult, TransmissionTask},
+        MacBufferAllocator, MacSvcContext,
+    },
     util::{Error, Result as SimplifiedResult},
 };
-
-pub enum DataError {
-    // TODO: not supported
-    TransactionOverflow,
-    // TODO: not supported
-    TransactionExpired,
-    // TODO: not supported
-    ChannelAccessFailure,
-    // TODO: not supported
-    InvalidAddress,
-    // TODO: not supported
-    NoAck,
-    // TODO: not supported
-    CounterError,
-    // TODO: not supported
-    FrameTooLong,
-    // TODO: not supported
-    InvalidParameter,
-}
 
 pub struct DataRequest {
     /// The frame to be sent.
@@ -165,64 +150,26 @@ pub(crate) struct DataRequestTask<'task, RadioDriverImpl: DriverConfig> {
     state: DataRequestState<'task, RadioDriverImpl>,
 }
 
-enum DataRequestState<'task, RadioDriverImpl: DriverConfig> {
+pub(crate) enum DataRequestState<'task, RadioDriverImpl: DriverConfig> {
     Initial(
         /// MPDU to be sent.
         MpduFrame,
+        /// MAC Service context
+        &'task RefCell<MacSvcContext<'task, RadioDriverImpl>>,
         /// Placeholder for future references.
         PhantomData<&'task RadioDriverImpl>,
     ),
-    SendingFrame,
+    SendingRequest(TransmissionTask<'task, RadioDriverImpl>),
 }
 
-impl<RadioDriverImpl: DriverConfig> DataRequestTask<'_, RadioDriverImpl> {
-    pub fn new(data_request: DataRequest) -> Self {
+impl<'task, RadioDriverImpl: DriverConfig> DataRequestTask<'task, RadioDriverImpl> {
+    pub fn new(
+        data_request: DataRequest,
+        context: &'task RefCell<MacSvcContext<'task, RadioDriverImpl>>,
+    ) -> Self {
         Self {
-            state: DataRequestState::Initial(data_request.mpdu, PhantomData),
+            state: DataRequestState::Initial(data_request.mpdu, context, PhantomData),
         }
-    }
-
-    fn handle_tx_driver_response(response: DrvSvcResponse) -> DataRequestResult {
-        match response {
-            DrvSvcResponse::Tx(tx_result) => match tx_result {
-                Ok(TxResult::Sent(sent_tx_frame)) => {
-                    #[cfg(feature = "rtos-trace")]
-                    rtos_trace::trace::marker(TX_FRAME);
-
-                    DataRequestResult::Sent(sent_tx_frame.forget_size::<RadioDriverImpl>())
-                }
-                // TODO: resend
-                Ok(TxResult::Nack(unacknowledged_tx_frame)) => {
-                    #[cfg(feature = "rtos-trace")]
-                    rtos_trace::trace::marker(TX_NACK);
-
-                    DataRequestResult::Nack(unacknowledged_tx_frame)
-                }
-                Err(tx_error) => match tx_error {
-                    // TODO: CSMA/CA
-                    DrvSvcTaskError::Task(TxError::CcaBusy(unsent_tx_frame)) => {
-                        #[cfg(feature = "rtos-trace")]
-                        rtos_trace::trace::marker(TX_CCABUSY);
-
-                        DataRequestResult::CcaBusy(unsent_tx_frame)
-                    }
-                    // TODO: Implement if required by a driver implementation.
-                    _ => unreachable!(),
-                },
-            },
-            // Safety: We issued a Tx task and therefore expect a Tx result.
-            _ => unreachable!(),
-        }
-    }
-
-    fn tx_task(tx_mpdu: MpduFrame) -> DrvSvcRequest {
-        DrvSvcTaskTx {
-            at: Timestamp::BestEffort,
-            radio_frame: tx_mpdu.into_radio_frame::<RadioDriverImpl>(),
-            // TODO: CSMA/CA
-            cca: false,
-        }
-        .into()
     }
 }
 
@@ -237,18 +184,18 @@ pub(crate) enum DataRequestResult {
         /// recovered Tx radio frame
         RadioFrame<RadioFrameUnsized>,
     ),
-    CcaBusy(
+    ChannelAccessFailure(
         /// unsent radio frame
         RadioFrame<RadioFrameSized>,
     ),
     /// Not acknowledged: timeout or explicit NACK
-    Nack(
+    NoAck(
         /// recovered Tx radio frame
         RadioFrame<RadioFrameSized>,
     ),
 }
 
-impl<RadioDriverImpl: DriverConfig> MacTask for DataRequestTask<'_, RadioDriverImpl> {
+impl<'task, RadioDriverImpl: DriverConfig> MacTask for DataRequestTask<'task, RadioDriverImpl> {
     type Result = DataRequestResult;
 
     fn step(mut self, event: MacTaskEvent) -> MacTaskTransition<Self> {
@@ -256,19 +203,39 @@ impl<RadioDriverImpl: DriverConfig> MacTask for DataRequestTask<'_, RadioDriverI
         rtos_trace::trace::task_exec_begin(MAC_REQUEST);
 
         match self.state {
-            DataRequestState::Initial(tx_mpdu, _) => {
+            DataRequestState::Initial(tx_mpdu, context, _) => {
                 debug_assert!(matches!(event, MacTaskEvent::Entry));
-                self.state = DataRequestState::SendingFrame;
-                MacTaskTransition::DrvSvcRequest(self, Self::tx_task(tx_mpdu), None)
-            }
-            DataRequestState::SendingFrame => {
-                match event {
-                    MacTaskEvent::DrvSvcResponse(driver_response) => {
-                        let request_result = Self::handle_tx_driver_response(driver_response);
-                        MacTaskTransition::Terminated(request_result)
+                match TransmissionTask::<RadioDriverImpl>::new(tx_mpdu, context)
+                    .step(MacTaskEvent::Entry)
+                {
+                    MacTaskTransition::DrvSvcRequest(transmission_task, drv_svc_request, _) => {
+                        self.state = DataRequestState::SendingRequest(transmission_task);
+                        MacTaskTransition::DrvSvcRequest(self, drv_svc_request, None)
                     }
-                    // Safety: We issued a Tx task and therefore expect a Tx result.
-                    _ => unreachable!(),
+                    MacTaskTransition::Terminated(_) => unreachable!(),
+                }
+            }
+            DataRequestState::SendingRequest(transmission_task) => {
+                match transmission_task.step(event) {
+                    MacTaskTransition::Terminated(transmission_result) => match transmission_result
+                    {
+                        TransmissionResult::Sent(radio_frame) => {
+                            MacTaskTransition::Terminated(DataRequestResult::Sent(radio_frame))
+                        }
+                        TransmissionResult::ChannelAccessFailure(radio_frame) => {
+                            MacTaskTransition::Terminated(DataRequestResult::ChannelAccessFailure(
+                                radio_frame,
+                            ))
+                        }
+                        TransmissionResult::NoAck(radio_frame) => {
+                            MacTaskTransition::Terminated(DataRequestResult::NoAck(radio_frame))
+                        }
+                        _ => unreachable!(),
+                    },
+                    MacTaskTransition::DrvSvcRequest(transmission_task, drv_svc_request, _) => {
+                        self.state = DataRequestState::SendingRequest(transmission_task);
+                        MacTaskTransition::DrvSvcRequest(self, drv_svc_request, None)
+                    }
                 }
             }
         }
