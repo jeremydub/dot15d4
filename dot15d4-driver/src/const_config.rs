@@ -8,7 +8,7 @@ mod customizable {
 
     // XXX These are just random numbers I picked by fair dice roll; what should
     // they be?
-    pub const MAC_MIN_BE: u8 = 0;
+    pub const MAC_MIN_BE: u8 = 3;
     pub const MAC_MAX_BE: u8 = 8;
     pub const MAC_MAX_CSMA_BACKOFFS: u8 = 16;
     pub const MAC_MAX_FRAME_RETRIES: u8 = 3; // 0-7

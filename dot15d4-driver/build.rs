@@ -7,7 +7,7 @@ fn main() {
     // (Variable, Type, Default value)
     // TODO: Set the default PAN ID to 0xffff once we implement association.
     let mut const_config: HashMap<&str, (&str, &str)> = HashMap::from([
-        ("MAC_MIN_BE", ("u8", "0")),
+        ("MAC_MIN_BE", ("u8", "3")),
         ("MAC_MAX_BE", ("u8", "8")),
         ("MAC_MAX_CSMA_BACKOFFS", ("u8", "16")),
         ("MAC_MAX_FRAME_RETRIES", ("u8", "3")),
