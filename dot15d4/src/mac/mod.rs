@@ -9,6 +9,7 @@ mod transmission;
 mod tsch;
 
 pub use dot15d4_frame as frame;
+use rand_core::RngCore;
 
 use core::cell::RefCell;
 

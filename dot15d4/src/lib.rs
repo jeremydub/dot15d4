@@ -3,6 +3,7 @@ pub mod driver;
 pub mod mac;
 
 pub use dot15d4_util as util;
+use rand_core::RngCore;
 
 use self::{
     driver::{
@@ -39,6 +40,7 @@ where
         request_receiver: MacRequestReceiver<'upper_layer>,
         indication_sender: MacIndicationSender<'upper_layer>,
         timer: RadioDriverImpl::Timer,
+        rng: &'upper_layer mut dyn RngCore,
     ) -> ! {
         #[cfg(feature = "rtos-trace")]
         self::trace::instrument();
@@ -51,6 +53,7 @@ where
         );
         let mut mac_service = MacService::<'_, RadioDriverImpl>::new(
             timer,
+            rng,
             buffer_allocator,
             request_receiver,
             indication_sender,

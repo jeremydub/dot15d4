@@ -23,6 +23,7 @@ embassy-nrf = { git = "https://github.com/fg-cfh/embassy.git", branch = "rtos-tr
     # The time driver is only required for rtos-trace.
     "time-driver-rtc1",
 ], optional = true, default-features = false }
+nrf52840-hal = { version = "0.18", optional = true }
 
 panic-probe = "1.0"
 heapless = "0.8"
@@ -77,6 +78,7 @@ tx_to_tx = ["_cortex-m"]
 _cortex-m = [
     "dep:cortex-m",
     "dep:cortex-m-rt",
+    "dep:nrf52840-hal",
     "embassy-executor/arch-cortex-m",
     "dot15d4/nrf52840",
     "dot15d4-embassy/nrf52840",

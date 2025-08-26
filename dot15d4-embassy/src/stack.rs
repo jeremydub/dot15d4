@@ -12,6 +12,8 @@ use embassy_net_driver::HardwareAddress;
 
 use crate::driver::Ieee802154Driver;
 
+use rand_core::RngCore;
+
 pub mod export {
     pub use dot15d4::mac::{MAC_BUFFER_SIZE, MAC_NUM_REQUIRED_BUFFERS};
     pub use dot15d4::util::buffer_allocator;
@@ -70,7 +72,7 @@ where
     RadioDriver<RadioDriverImpl, TaskRx>: RxState<RadioDriverImpl> + RadioDriverApi,
     RadioDriver<RadioDriverImpl, TaskTx>: TxState<RadioDriverImpl> + RadioDriverApi,
 {
-    pub async fn run(&self) -> ! {
+    pub async fn run<'a>(&self, rng: &'a mut dyn RngCore) -> ! {
         let radio = self.radio.take().expect("already running");
         let timer = radio.timer();
         let device = Device::new(radio);
@@ -80,6 +82,7 @@ where
                 self.request_channel.receiver(),
                 self.indication_channel.sender(),
                 timer,
+                rng,
             )
             .await
     }
