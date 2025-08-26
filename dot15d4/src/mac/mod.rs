@@ -401,9 +401,8 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
             MacSvcTaskResult::DataRequest(task_result) => {
                 let recovered_radio_frame = match task_result {
                     DataRequestResult::Sent(recovered_radio_frame) => recovered_radio_frame,
-                    DataRequestResult::CcaBusy(unsent_radio_frame)
-                    | DataRequestResult::Nack(unsent_radio_frame) => {
-                        // TODO: CSMA/CA or Retry.
+                    DataRequestResult::ChannelAccessFailure(unsent_radio_frame)
+                    | DataRequestResult::NoAck(unsent_radio_frame) => {
                         unsent_radio_frame.forget_size::<RadioDriverImpl>()
                     }
                 };
@@ -473,6 +472,246 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
                 unsafe {
                     self.buffer_allocator.deallocate_buffer(mpdu.into_buffer());
                 }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    use dot15d4_driver::constants::PHY_MAX_PACKET_SIZE_127;
+    use dot15d4_driver::frame::AddressingMode::Short;
+    use dot15d4_driver::frame::{
+        Address, AddressingRepr, FrameType, FrameVersion, PanIdCompressionRepr, RadioFrameUnsized,
+        ShortAddress,
+    };
+    use dot15d4_driver::frame::{RadioFrame, RadioFrameSized};
+    use dot15d4_driver::radio::{DriverConfig, FcsTwoBytes};
+    use dot15d4_driver::tasks::{TaskRx, TaskTx, TxError, TxResult};
+    use dot15d4_driver::timer::{LocalClockInstant, RadioTimerApi};
+    use dot15d4_frame::repr::{MpduRepr, SeqNrRepr};
+    use dot15d4_util::allocator::BufferToken;
+    use rand_core::{impls, RngCore};
+    use typenum::{U, U1, U2};
+
+    use crate::driver::{DrvSvcResponse, DrvSvcTaskError, DrvSvcTaskResult};
+
+    use super::task::{MacTask, MacTaskEvent, MacTaskTransition};
+
+    #[derive(Copy, Clone)]
+    pub(crate) struct FakeRadioTimer {
+        current_time: LocalClockInstant,
+    }
+
+    impl FakeRadioTimer {
+        pub fn new() -> Self {
+            Self {
+                current_time: LocalClockInstant::from_ticks(0),
+            }
+        }
+        pub fn update(&mut self, instant: LocalClockInstant) {
+            self.current_time = instant;
+        }
+    }
+
+    impl RadioTimerApi for FakeRadioTimer {
+        fn now(&self) -> LocalClockInstant {
+            self.current_time
+        }
+
+        unsafe fn wait_until(
+            &self,
+            _instant: LocalClockInstant,
+            _signal: Option<dot15d4_driver::timer::HardwareSignal>,
+        ) -> impl core::prelude::rust_2024::Future<Output = dot15d4_driver::timer::RadioTimerResult>
+        {
+            core::future::ready(dot15d4_driver::timer::RadioTimerResult::Ok)
+        }
+
+        unsafe fn schedule_event(
+            &self,
+            _timed_signal: dot15d4_driver::timer::TimedSignal,
+        ) -> dot15d4_driver::timer::RadioTimerResult {
+            todo!()
+        }
+    }
+
+    pub(crate) struct FakeDriverConfig;
+    impl DriverConfig for FakeDriverConfig {
+        type Headroom = U1;
+        type Tailroom = U2;
+        type MaxSduLength = U<PHY_MAX_PACKET_SIZE_127>;
+        type Fcs = FcsTwoBytes;
+        type Timer = FakeRadioTimer;
+    }
+
+    pub(crate) struct FakeRng<'a> {
+        numbers: &'a [u64],
+        next_index: usize,
+    }
+
+    impl<'a> FakeRng<'a> {
+        pub(crate) fn new(numbers: &'a [u64]) -> Self {
+            FakeRng {
+                numbers,
+                next_index: 0,
+            }
+        }
+    }
+
+    impl RngCore for FakeRng<'_> {
+        fn next_u32(&mut self) -> u32 {
+            self.next_u64() as u32
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            let value = self.numbers[self.next_index];
+            self.next_index = (self.next_index + 1) % self.numbers.len();
+            value
+        }
+
+        fn fill_bytes(&mut self, dst: &mut [u8]) {
+            impls::fill_bytes_via_next(self, dst)
+        }
+
+        fn try_fill_bytes(&mut self, _dest: &mut [u8]) -> Result<(), rand_core::Error> {
+            Ok(())
+        }
+    }
+
+    pub(crate) fn generate_data_frame(buffer: &'static mut [u8]) -> RadioFrame<RadioFrameSized> {
+        #[allow(static_mut_refs)]
+        let buffer = BufferToken::new(unsafe { buffer });
+
+        const PAYLOAD: [u8; 32] = [0u8; 32];
+
+        // Building representation of the data frame
+        let mut mpdu_parser = MpduRepr::new()
+            .with_frame_control(SeqNrRepr::Yes)
+            .with_addressing(AddressingRepr::new(
+                Short,
+                Short,
+                true,
+                PanIdCompressionRepr::Legacy,
+            ))
+            .without_security()
+            .without_ies()
+            .into_parsed_mpdu::<FakeDriverConfig>(
+                FrameVersion::Ieee802154,
+                FrameType::Data,
+                PAYLOAD.len() as u16,
+                buffer,
+            )
+            .unwrap();
+
+        mpdu_parser.set_ack_request(true);
+        mpdu_parser.set_sequence_number(42);
+        let mut addressing_fiels = mpdu_parser.addressing_fields_mut();
+        addressing_fiels
+            .src_address_mut()
+            .set(&Address::Short(ShortAddress::<&[u8]>::from_u16(1)));
+        addressing_fiels
+            .dst_address_mut()
+            .set(&Address::Short(ShortAddress::<&[u8]>::from_u16(2)));
+
+        mpdu_parser.into_radio_frame::<FakeDriverConfig>()
+    }
+
+    pub(crate) enum TaskTestEvent {
+        TaskEntry,
+        DrvRespTxSent,
+        DrvRespTxCcaBusy,
+        DrvRespTxNoAck,
+        // DrvRespRxFrame(RadioFrame<RadioFrameSized>),
+        // DrvRespRxWindowEnded(RadioFrame<RadioFrameSized>),
+        // DrvRespRxCrcError(RadioFrame<RadioFrameSized>),
+        // DrvRespRxFilteredFrame(RadioFrame<RadioFrameSized>),
+        // DrvRespOff(),
+    }
+
+    pub(crate) enum TaskTestTransition<'a, Task: MacTask> {
+        TaskTerminated(&'a dyn Fn(Task::Result)),
+        DrvReqTx(&'a dyn Fn(TaskTx, Option<Task::Result>) -> TaskTx),
+        DrvReqRx(&'a dyn Fn(TaskRx, Option<Task::Result>) -> TaskRx),
+    }
+
+    pub(crate) struct TaskTester<Task: MacTask> {
+        task: Option<Task>,
+        tx_frame: Option<RadioFrame<RadioFrameSized>>,
+        rx_frame: Option<RadioFrame<RadioFrameUnsized>>,
+    }
+    impl<Task: MacTask> TaskTester<Task> {
+        pub(crate) fn new(task: Task) -> Self {
+            Self {
+                task: Some(task),
+                tx_frame: None,
+                rx_frame: None,
+            }
+        }
+
+        pub fn assert_transition<'a>(
+            &mut self,
+            event: TaskTestEvent,
+            expected_transition: TaskTestTransition<'a, Task>,
+        ) {
+            let transition = match event {
+                TaskTestEvent::TaskEntry => {
+                    Some(self.task.take().unwrap().step(MacTaskEvent::Entry))
+                }
+                TaskTestEvent::DrvRespTxSent => Some(self.task.take().unwrap().step(
+                    MacTaskEvent::DrvSvcResponse(crate::driver::DrvSvcResponse::Tx(
+                        DrvSvcTaskResult::Ok(TxResult::Sent(self.tx_frame.take().unwrap())),
+                    )),
+                )),
+                TaskTestEvent::DrvRespTxCcaBusy => Some(self.task.take().unwrap().step(
+                    MacTaskEvent::DrvSvcResponse(DrvSvcResponse::Tx(DrvSvcTaskResult::Err(
+                        DrvSvcTaskError::Task(TxError::CcaBusy(self.tx_frame.take().unwrap())),
+                    ))),
+                )),
+                TaskTestEvent::DrvRespTxNoAck => Some(self.task.take().unwrap().step(
+                    MacTaskEvent::DrvSvcResponse(DrvSvcResponse::Tx(DrvSvcTaskResult::Ok(
+                        TxResult::Nack(self.tx_frame.take().unwrap()),
+                    ))),
+                )),
+                // TaskTestEvent::DrvRespRxFrame(radio_frame) => todo!(),
+                // TaskTestEvent::DrvRespRxWindowEnded(radio_frame) => todo!(),
+                // TaskTestEvent::DrvRespRxCrcError(radio_frame) => todo!(),
+                // TaskTestEvent::DrvRespRxFilteredFrame(radio_frame) => todo!(),
+                // TaskTestEvent::DrvRespOff() => todo!(),
+            };
+
+            match expected_transition {
+                TaskTestTransition::TaskTerminated(test_fn) => match transition.unwrap() {
+                    MacTaskTransition::Terminated(result) => test_fn(result),
+                    _ => unreachable!("Expected MAC Transmission termination"),
+                },
+                TaskTestTransition::DrvReqTx(test_fn) => match transition.unwrap() {
+                    MacTaskTransition::DrvSvcRequest(task, drv_svc_request, result) => {
+                        match drv_svc_request {
+                            crate::driver::DrvSvcRequest::Tx(mut task_tx) => {
+                                task_tx = test_fn(task_tx, result);
+                                self.tx_frame = Some(task_tx.radio_frame);
+                                self.task = Some(task);
+                            }
+                            _ => unreachable!("Expected Driver TX request"),
+                        }
+                    }
+                    _ => unreachable!("Expected Driver request"),
+                },
+                TaskTestTransition::DrvReqRx(test_fn) => match transition.unwrap() {
+                    MacTaskTransition::DrvSvcRequest(task, drv_svc_request, result) => {
+                        match drv_svc_request {
+                            crate::driver::DrvSvcRequest::Rx(mut task_rx) => {
+                                task_rx = test_fn(task_rx, result);
+                                self.task = Some(task);
+                                self.rx_frame = Some(task_rx.radio_frame);
+                            }
+                            _ => unreachable!("Expected Driver TX request"),
+                        }
+                    }
+                    _ => unreachable!("Expected Driver request"),
+                },
             }
         }
     }
