@@ -5,7 +5,7 @@ use panic_probe as _;
 
 use dot15d4::driver::{
     radio::RadioDriver,
-    socs::nrf::NrfRadioDriver,
+    socs::nrf::{export::pac, NrfRadioDriver},
     timer::{LocalClockDuration, RadioTimerApi, RadioTimerResult},
 };
 use dot15d4_embassy::{
@@ -19,6 +19,7 @@ use embassy_net::{
     IpAddress, IpEndpoint, Ipv6Address, Ipv6Cidr, Runner,
 };
 use heapless::Vec;
+use nrf52840_hal::Rng;
 use static_cell::StaticCell;
 
 const FRAME_PERIOD: LocalClockDuration = LocalClockDuration::millis(10);
@@ -48,7 +49,7 @@ async fn main(spawner: Spawner) {
     let driver = radio_stack.driver();
 
     // We spawn the task that will control the CSMA task
-    let ieee802154_task = ieee802154_task(radio_stack).unwrap();
+    let ieee802154_task = ieee802154_task(radio_stack, peripherals.rng).unwrap();
     #[cfg(feature = "rtos-trace")]
     ieee802154_task.metadata().set_name("dot15d4\0");
     spawner.spawn(ieee802154_task);
@@ -120,8 +121,12 @@ async fn main(spawner: Spawner) {
 
 /// Run Radio stack in the background
 #[embassy_executor::task]
-async fn ieee802154_task(radio_stack: &'static Ieee802154Stack<NrfRadioDriver>) -> ! {
-    radio_stack.run().await
+async fn ieee802154_task(
+    radio_stack: &'static Ieee802154Stack<NrfRadioDriver>,
+    p_rng: pac::RNG,
+) -> ! {
+    let mut rng = Rng::new(p_rng);
+    radio_stack.run(&mut rng).await
 }
 
 #[embassy_executor::task]

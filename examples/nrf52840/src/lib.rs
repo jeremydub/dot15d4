@@ -3,7 +3,7 @@
 use dot15d4::driver::socs::nrf::{
     executor::{self as executor, swi0::NrfInterruptExecutor},
     export::{
-        pac::{CorePeripherals, Peripherals, CLOCK, GPIOTE, NVMC, RADIO, SCB, UICR},
+        pac::{CorePeripherals, Peripherals, CLOCK, GPIOTE, NVMC, RADIO, RNG, SCB, UICR},
         Clocks, ExternalOscillator, LfOscConfiguration, LfOscStarted,
     },
     NrfRadioTimer,
@@ -135,6 +135,7 @@ pub struct AvailablePeripherals {
     #[cfg(feature = "gpio-trace")]
     pub gpiote: GPIOTE,
     pub radio: RADIO,
+    pub rng: RNG,
 }
 
 pub fn config_peripherals() -> (
@@ -184,6 +185,7 @@ pub fn config_peripherals() -> (
         #[cfg(feature = "gpio-trace")]
         gpiote: peripherals.GPIOTE,
         radio: peripherals.RADIO,
+        rng: peripherals.RNG,
     };
 
     (available_peripherals, clocks, timer)

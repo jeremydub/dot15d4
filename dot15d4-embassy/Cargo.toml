@@ -27,6 +27,8 @@ embassy-nrf = { git = "https://github.com/fg-cfh/embassy.git", branch = "rtos-tr
 
 rtos-trace = { version = "0.2", optional = true }
 
+rand_core = { version = "0.6.4", default-features = false } # version 0.6.4 required by embassy
+
 [features]
 nrf = []
 nrf52840 = ["dep:embassy-nrf", "embassy-nrf/nrf52840", "nrf"]

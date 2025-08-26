@@ -9,6 +9,7 @@ mod transmission;
 mod tsch;
 
 pub use dot15d4_frame as frame;
+use rand_core::RngCore;
 
 use core::cell::RefCell;
 
@@ -220,6 +221,7 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
     /// Creates a new [`MacService<U, Timer, R>`].
     pub fn new(
         timer: RadioDriverImpl::Timer,
+        rng: &'svc mut dyn RngCore,
         buffer_allocator: MacBufferAllocator,
         request_receiver: MacRequestReceiver<'svc>,
         indication_sender: MacIndicationSender<'svc>,
