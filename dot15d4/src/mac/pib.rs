@@ -55,6 +55,11 @@ pub struct Pib {
     /// Beacon frame. Value ranges from 0 to 15. If value is 15, no periodic
     /// Enhanced Beacon frame will be transmitted.
     pub(crate) enhanced_beacon_order: u8,
+    /// Indication of whether the device is joining (or associated to) a TSCH
+    /// network (i.e. not using unslotted CSMA-CA)
+    pub(crate) tsch_mode: bool,
+    /// Indication of whether the device should use CCA during CSMA-CA TSCH
+    pub(crate) tsch_cca: bool,
 }
 
 impl Default for Pib {
@@ -77,6 +82,8 @@ impl Default for Pib {
             security_enabled: false,
             short_address: 0xffff,
             enhanced_beacon_order: 0,
+            tsch_mode: false,
+            tsch_cca: false,
         }
     }
 }
