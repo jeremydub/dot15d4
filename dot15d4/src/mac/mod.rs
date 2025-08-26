@@ -305,7 +305,6 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
         event: MacTaskEvent,
     ) {
         let is_mac_request = mac_svc_task_index < MAC_NUM_PARALLEL_REQUEST_TASKS;
-        let is_mac_indication = !is_mac_request;
 
         let task_result = match mac_svc_task.step(event) {
             MacTaskTransition::DrvSvcRequest(updated_task, driver_request, intermediate_result) => {
@@ -324,15 +323,7 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
                     .push(driver_response_token)
                     .unwrap();
                 state.mac_svc_tasks[mac_svc_task_index] = Some(updated_task);
-                debug_assert!({
-                    if intermediate_result.is_some() {
-                        // Only indications may produce intermediate results.
-                        is_mac_indication
-                    } else {
-                        true
-                    }
-                });
-                intermediate_result
+                intermediate_result.map(MacTaskResultType::Intermediate)
             }
             MacTaskTransition::Terminated(task_result) => {
                 #[cfg(feature = "rtos-trace")]
@@ -341,20 +332,24 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
                 // Only MAC requests may terminate.
                 debug_assert!(is_mac_request);
 
-                Some(task_result)
+                Some(MacTaskResultType::Final(task_result))
             }
         };
 
         if let Some(task_result) = task_result {
             if is_mac_request {
-                self.handle_request_task_result(
-                    task_result,
-                    state.outstanding_mac_requests[mac_svc_task_index]
-                        .take()
-                        .unwrap(),
-                );
+                if let MacTaskResultType::Final(task_result) = task_result {
+                    self.handle_request_task_result(
+                        task_result,
+                        state.outstanding_mac_requests[mac_svc_task_index]
+                            .take()
+                            .unwrap(),
+                    )
+                }
+            } else if let MacTaskResultType::Intermediate(task_result) = task_result {
+                self.handle_indication_task_result(task_result)
             } else {
-                self.handle_indication_task_result(task_result);
+                unreachable!();
             }
         }
     }

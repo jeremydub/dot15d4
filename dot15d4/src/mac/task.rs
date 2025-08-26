@@ -1,4 +1,8 @@
+use dot15d4_driver::radio::DriverConfig;
+
 use crate::driver::{DrvSvcRequest, DrvSvcResponse};
+
+use super::MacSvcTaskResult;
 
 /// A MAC task represents a - possibly infinite - stream of driver
 /// request/response exchanges each of which MAY time out.
@@ -70,4 +74,9 @@ pub enum MacTaskTransition<Task: MacTask> {
     /// Signals to the executor that the state machine exited, possibly with a
     /// final result.
     Terminated(Task::Result),
+}
+
+pub enum MacTaskResultType<'task, RadioDriverImpl: DriverConfig> {
+    Intermediate(MacSvcTaskResult<'task, RadioDriverImpl>),
+    Final(MacSvcTaskResult<'task, RadioDriverImpl>),
 }
