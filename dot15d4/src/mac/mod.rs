@@ -1,9 +1,11 @@
+mod csma;
 mod mcps;
 mod mlme;
 mod neighbors;
 mod pib;
 pub mod primitives;
 mod task;
+mod transmission;
 mod tsch;
 
 pub use dot15d4_frame as frame;
@@ -152,6 +154,12 @@ mac_svc_tasks!(DataRequest, DataIndication);
 
 const NUM_MAC_SVC_TASKS: usize = MAC_NUM_PARALLEL_REQUEST_TASKS + MAC_NUM_PARALLEL_INDICATION_TASKS;
 
+pub(crate) struct MacSvcContext<'svc, RadioDriverImpl: DriverConfig> {
+    pib: Pib,
+    rng: &'svc mut dyn RngCore,
+    timer: RadioDriverImpl::Timer,
+}
+
 struct MacServiceState<'state, RadioDriverImpl: DriverConfig> {
     // MAC request tasks are indexed by the message slots of the corresponding
     // MAC requests (0..UL_NUM_PARALLEL_REQUESTS).
@@ -204,14 +212,15 @@ pub struct MacService<'svc, RadioDriverImpl: DriverConfig> {
     indication_sender: MacIndicationSender<'svc>,
     /// Channel to communicate with one or several radio drivers.
     driver_request_sender: DriverRequestSender<'svc>,
-    /// PAN Information Base
-    pib: RefCell<Pib>,
+    /// Context shared among tasks, containing PIB.
+    context: RefCell<MacSvcContext<'svc, RadioDriverImpl>>,
 }
 
 impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
     /// Creates a new [`MacService<U, Timer, R>`].
     pub fn new(
         timer: RadioDriverImpl::Timer,
+        rng: &'svc mut dyn RngCore,
         buffer_allocator: MacBufferAllocator,
         request_receiver: MacRequestReceiver<'svc>,
         indication_sender: MacIndicationSender<'svc>,
@@ -223,7 +232,11 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
             request_receiver,
             indication_sender,
             driver_request_sender,
-            pib: RefCell::new(Pib::default()),
+            context: RefCell::new(MacSvcContext {
+                pib: Pib::default(),
+                rng,
+                timer,
+            }),
         }
     }
 
@@ -235,7 +248,7 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
     /// will be passed on to the driver service. Whenever the driver service
     /// returns a response it will be used to drive the corresponding state
     /// machine.
-    pub async fn run(&mut self) -> ! {
+    pub async fn run(&'svc mut self) -> ! {
         let mut state = MacServiceState::new();
 
         self.create_indication_tasks(&mut state);
@@ -366,10 +379,13 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
         }
     }
 
-    fn create_request_task(&self, mac_request: MacRequest) -> MacSvcTask<'_, RadioDriverImpl> {
+    fn create_request_task(
+        &'svc self,
+        mac_request: MacRequest,
+    ) -> MacSvcTask<'svc, RadioDriverImpl> {
         match mac_request {
             MacRequest::McpsDataRequest(data_request) => {
-                MacSvcTask::DataRequest(DataRequestTask::new(data_request))
+                MacSvcTask::DataRequest(DataRequestTask::new(data_request, &self.context))
             }
             MacRequest::MlmeBeaconRequest(_) => todo!(),
             MacRequest::MlmeSetRequest(_) => todo!(),

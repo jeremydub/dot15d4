@@ -21,10 +21,10 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
     ///
     /// * `attribute` - Attribute to write
     pub(crate) async fn mlme_set_request(
-        &self,
+        &mut self,
         attribute: &SetRequestAttribute,
     ) -> Result<(), SetError> {
-        let mut pib = self.pib.borrow_mut();
+        let pib = &mut self.context.borrow_mut().pib;
         match attribute {
             SetRequestAttribute::MacPanId(pan_id) => pib.pan_id.set_u16(*pan_id),
             SetRequestAttribute::MacShortAddress(short_address) => {

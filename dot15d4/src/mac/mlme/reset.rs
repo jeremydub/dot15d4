@@ -1,5 +1,3 @@
-use core::cell::RefCell;
-
 use crate::{
     driver::radio::DriverConfig,
     mac::{pib, MacService},
@@ -16,7 +14,7 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
     /// involves resetting the PAN Information Base
     async fn mlme_reset_request(&mut self, set_default_pib: bool) -> Result<ResetConfirm, ()> {
         if set_default_pib {
-            self.pib = RefCell::new(pib::Pib::default());
+            self.context.borrow_mut().pib = pib::Pib::default();
         }
         Ok(ResetConfirm { status: true })
     }
