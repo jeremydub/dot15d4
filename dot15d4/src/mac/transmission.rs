@@ -163,3 +163,596 @@ impl<'task, RadioDriverImpl: DriverConfig> MacTask for TransmissionTask<'task, R
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use core::cell::RefCell;
+    use dot15d4_frame::mpdu::MpduFrame;
+    use dot15d4_util::allocator::IntoBuffer;
+
+    use crate::mac::pib::Pib;
+    use crate::mac::tests::{
+        generate_data_frame, FakeDriverConfig, FakeRadioTimer, FakeRng, TaskTestEvent,
+        TaskTestTransition, TaskTester,
+    };
+    use crate::mac::MacSvcContext;
+
+    use super::{TransmissionResult, TransmissionTask};
+
+    #[test]
+    fn transmission_no_retransmission_success() {
+        // Allocating non-droppable buffer
+        const BUF_LEN: usize = 127;
+        static mut BUFFER: [u8; BUF_LEN] = [0; BUF_LEN];
+        // Dataframe used by the state machine
+        #[allow(static_mut_refs)]
+        let radio_frame = unsafe { generate_data_frame(&mut BUFFER) };
+
+        // Fake RNG with predefined sequence of numbers
+        let arbitrary_sequence = [1, 2, 4, 0];
+        let mut rng = FakeRng::new(&arbitrary_sequence);
+
+        let context = RefCell::new(MacSvcContext {
+            pib: Pib::default(),
+            rng: &mut rng,
+            timer: FakeRadioTimer::new(),
+        });
+        let task = TransmissionTask::<FakeDriverConfig>::new(
+            MpduFrame::from_radio_frame(radio_frame),
+            &context,
+        );
+
+        let mut tester = TaskTester::new(task);
+
+        tester.assert_transition(
+            TaskTestEvent::TaskEntry,
+            TaskTestTransition::DrvReqTx(&|task_tx, _result| {
+                // TODO check timestamps
+                // assert_eq!(task_tx.at, Timestamp::Scheduled(Instant::new(0)));
+                task_tx
+            }),
+        );
+
+        tester.assert_transition(
+            TaskTestEvent::DrvRespTxSent,
+            TaskTestTransition::TaskTerminated(&|result| match result {
+                TransmissionResult::Sent(radio_frame) => {
+                    unsafe { radio_frame.into_buffer().consume() };
+                }
+                _ => unreachable!("Unexpected Transmission task result"),
+            }),
+        );
+    }
+
+    #[test]
+    fn transmission_no_retransmission_failure() {
+        // Allocating non-droppable buffer
+        const BUF_LEN: usize = 127;
+        static mut BUFFER: [u8; BUF_LEN] = [0; BUF_LEN];
+        // Dataframe used by the state machine
+        #[allow(static_mut_refs)]
+        let radio_frame = unsafe { generate_data_frame(&mut BUFFER) };
+
+        // Fake RNG with predefined sequence of numbers
+        let arbitrary_sequence = [1, 2, 4, 0];
+        let mut rng = FakeRng::new(&arbitrary_sequence);
+
+        let context = RefCell::new(MacSvcContext {
+            pib: Pib::default(),
+            rng: &mut rng,
+            timer: FakeRadioTimer::new(),
+        });
+        let task = TransmissionTask::<FakeDriverConfig>::new(
+            MpduFrame::from_radio_frame(radio_frame),
+            &context,
+        );
+
+        context.borrow_mut().pib.max_csma_backoffs = 1;
+        context.borrow_mut().pib.max_frame_retries = 0;
+
+        let mut tester = TaskTester::new(task);
+
+        tester.assert_transition(
+            TaskTestEvent::TaskEntry,
+            TaskTestTransition::DrvReqTx(&|task_tx, _result| {
+                // TODO check timestamps
+                // assert_eq!(task_tx.at, Timestamp::Scheduled(Instant::new(0)));
+                task_tx
+            }),
+        );
+
+        tester.assert_transition(
+            TaskTestEvent::DrvRespTxCcaBusy,
+            TaskTestTransition::DrvReqTx(&|task_tx, _result| {
+                // TODO check timestamps
+                task_tx
+            }),
+        );
+
+        tester.assert_transition(
+            TaskTestEvent::DrvRespTxCcaBusy,
+            TaskTestTransition::TaskTerminated(&|result| match result {
+                TransmissionResult::ChannelAccessFailure(radio_frame) => {
+                    unsafe { radio_frame.into_buffer().consume() };
+                }
+                _ => unreachable!("Unexpected Transmission task result"),
+            }),
+        );
+    }
+
+    #[test]
+    fn transmission_no_retransmission_noack() {
+        // Allocating non-droppable buffer
+        const BUF_LEN: usize = 127;
+        static mut BUFFER: [u8; BUF_LEN] = [0; BUF_LEN];
+        // Dataframe used by the state machine
+        #[allow(static_mut_refs)]
+        let radio_frame = unsafe { generate_data_frame(&mut BUFFER) };
+
+        // Fake RNG with predefined sequence of numbers
+        let arbitrary_sequence = [1, 2, 4, 0];
+        let mut rng = FakeRng::new(&arbitrary_sequence);
+
+        let context = RefCell::new(MacSvcContext {
+            pib: Pib::default(),
+            rng: &mut rng,
+            timer: FakeRadioTimer::new(),
+        });
+        let task = TransmissionTask::<FakeDriverConfig>::new(
+            MpduFrame::from_radio_frame(radio_frame),
+            &context,
+        );
+
+        context.borrow_mut().pib.max_csma_backoffs = 1;
+        context.borrow_mut().pib.max_frame_retries = 0;
+
+        let mut tester = TaskTester::new(task);
+
+        tester.assert_transition(
+            TaskTestEvent::TaskEntry,
+            TaskTestTransition::DrvReqTx(&|task_tx, _result| {
+                // TODO check timestamps
+                // assert_eq!(task_tx.at, Timestamp::Scheduled(Instant::new(0)));
+                task_tx
+            }),
+        );
+
+        tester.assert_transition(
+            TaskTestEvent::DrvRespTxCcaBusy,
+            TaskTestTransition::DrvReqTx(&|task_tx, _result| {
+                // TODO check timestamps
+                task_tx
+            }),
+        );
+
+        tester.assert_transition(
+            TaskTestEvent::DrvRespTxNoAck,
+            TaskTestTransition::TaskTerminated(&|result| match result {
+                TransmissionResult::NoAck(radio_frame) => {
+                    unsafe { radio_frame.into_buffer().consume() };
+                }
+                _ => unreachable!("Unexpected Transmission task result"),
+            }),
+        );
+    }
+
+    #[test]
+    fn transmission_one_retransmission_success() {
+        // Allocating non-droppable buffer
+        const BUF_LEN: usize = 127;
+        static mut BUFFER: [u8; BUF_LEN] = [0; BUF_LEN];
+        // Dataframe used by the state machine
+        #[allow(static_mut_refs)]
+        let radio_frame = unsafe { generate_data_frame(&mut BUFFER) };
+
+        // Fake RNG with predefined sequence of numbers
+        let arbitrary_sequence = [1, 2, 4, 0];
+        let mut rng = FakeRng::new(&arbitrary_sequence);
+
+        let context = RefCell::new(MacSvcContext {
+            pib: Pib::default(),
+            rng: &mut rng,
+            timer: FakeRadioTimer::new(),
+        });
+
+        context.borrow_mut().pib.max_csma_backoffs = 1;
+        context.borrow_mut().pib.max_frame_retries = 1;
+
+        let task = TransmissionTask::<FakeDriverConfig>::new(
+            MpduFrame::from_radio_frame(radio_frame),
+            &context,
+        );
+
+        let mut tester = TaskTester::new(task);
+
+        tester.assert_transition(
+            TaskTestEvent::TaskEntry,
+            TaskTestTransition::DrvReqTx(&|task_tx, _result| {
+                // TODO check timestamps
+                // assert_eq!(task_tx.at, Timestamp::Scheduled(Instant::new(0)));
+                task_tx
+            }),
+        );
+
+        tester.assert_transition(
+            TaskTestEvent::DrvRespTxCcaBusy,
+            TaskTestTransition::DrvReqTx(&|task_tx, _result| {
+                // TODO check timestamps
+                // assert_eq!(task_tx.at, Timestamp::Scheduled(Instant::new(0)));
+                task_tx
+            }),
+        );
+        tester.assert_transition(
+            TaskTestEvent::DrvRespTxNoAck,
+            TaskTestTransition::DrvReqTx(&|task_tx, result| {
+                // TODO check timestamps
+                // assert_eq!(task_tx.at, Timestamp::Scheduled(Instant::new(0)));
+                match result.unwrap() {
+                    TransmissionResult::Retransmitting(attempt) => {
+                        assert_eq!(attempt, 2);
+                    }
+                    _ => unreachable!("Expected Retransmitting state in Transmission Task"),
+                };
+                task_tx
+            }),
+        );
+        tester.assert_transition(
+            TaskTestEvent::DrvRespTxSent,
+            TaskTestTransition::TaskTerminated(&|result| {
+                // TODO check timestamps
+                // assert_eq!(task_tx.at, Timestamp::Scheduled(Instant::new(0)));
+                match result {
+                    TransmissionResult::Sent(radio_frame) => {
+                        unsafe { radio_frame.into_buffer().consume() };
+                    }
+                    _ => unreachable!(),
+                }
+            }),
+        );
+    }
+
+    #[test]
+    fn transmission_one_retransmission_failure() {
+        // Allocating non-droppable buffer
+        const BUF_LEN: usize = 127;
+        static mut BUFFER: [u8; BUF_LEN] = [0; BUF_LEN];
+        // Dataframe used by the state machine
+        #[allow(static_mut_refs)]
+        let radio_frame = unsafe { generate_data_frame(&mut BUFFER) };
+
+        // Fake RNG with predefined sequence of numbers
+        let arbitrary_sequence = [1, 2, 4, 0];
+        let mut rng = FakeRng::new(&arbitrary_sequence);
+
+        let context = RefCell::new(MacSvcContext {
+            pib: Pib::default(),
+            rng: &mut rng,
+            timer: FakeRadioTimer::new(),
+        });
+        let task = TransmissionTask::<FakeDriverConfig>::new(
+            MpduFrame::from_radio_frame(radio_frame),
+            &context,
+        );
+
+        context.borrow_mut().pib.max_csma_backoffs = 1;
+        context.borrow_mut().pib.max_frame_retries = 1;
+
+        let mut tester = TaskTester::new(task);
+
+        tester.assert_transition(
+            TaskTestEvent::TaskEntry,
+            TaskTestTransition::DrvReqTx(&|task_tx, _result| {
+                // TODO check timestamps
+                // assert_eq!(task_tx.at, Timestamp::Scheduled(Instant::new(0)));
+                task_tx
+            }),
+        );
+        tester.assert_transition(
+            TaskTestEvent::DrvRespTxCcaBusy,
+            TaskTestTransition::DrvReqTx(&|task_tx, _result| {
+                // TODO check timestamps
+                task_tx
+            }),
+        );
+
+        tester.assert_transition(
+            TaskTestEvent::DrvRespTxNoAck,
+            TaskTestTransition::DrvReqTx(&|task_tx, result| {
+                // TODO check timestamps
+                match result.unwrap() {
+                    TransmissionResult::Retransmitting(attempt) => {
+                        assert_eq!(attempt, 2);
+                    }
+                    _ => unreachable!("Expected Retransmitting state in Transmission Task"),
+                };
+                task_tx
+            }),
+        );
+        tester.assert_transition(
+            TaskTestEvent::DrvRespTxCcaBusy,
+            TaskTestTransition::DrvReqTx(&|task_tx, _result| {
+                // TODO check timestamps
+                task_tx
+            }),
+        );
+
+        tester.assert_transition(
+            TaskTestEvent::DrvRespTxCcaBusy,
+            TaskTestTransition::TaskTerminated(&|result| match result {
+                TransmissionResult::ChannelAccessFailure(radio_frame) => {
+                    unsafe { radio_frame.into_buffer().consume() };
+                }
+                _ => unreachable!("Unexpected Transmission task result"),
+            }),
+        );
+    }
+
+    #[test]
+    fn transmission_one_retransmission_noack() {
+        // Allocating non-droppable buffer
+        const BUF_LEN: usize = 127;
+        static mut BUFFER: [u8; BUF_LEN] = [0; BUF_LEN];
+        // Dataframe used by the state machine
+        #[allow(static_mut_refs)]
+        let radio_frame = unsafe { generate_data_frame(&mut BUFFER) };
+
+        // Fake RNG with predefined sequence of numbers
+        let arbitrary_sequence = [1, 2, 4, 0];
+        let mut rng = FakeRng::new(&arbitrary_sequence);
+
+        let context = RefCell::new(MacSvcContext {
+            pib: Pib::default(),
+            rng: &mut rng,
+            timer: FakeRadioTimer::new(),
+        });
+        let task = TransmissionTask::<FakeDriverConfig>::new(
+            MpduFrame::from_radio_frame(radio_frame),
+            &context,
+        );
+
+        context.borrow_mut().pib.max_csma_backoffs = 1;
+        context.borrow_mut().pib.max_frame_retries = 1;
+
+        let mut tester = TaskTester::new(task);
+
+        tester.assert_transition(
+            TaskTestEvent::TaskEntry,
+            TaskTestTransition::DrvReqTx(&|task_tx, _result| {
+                // TODO check timestamps
+                // assert_eq!(task_tx.at, Timestamp::Scheduled(Instant::new(0)));
+                task_tx
+            }),
+        );
+        tester.assert_transition(
+            TaskTestEvent::DrvRespTxCcaBusy,
+            TaskTestTransition::DrvReqTx(&|task_tx, _result| {
+                // TODO check timestamps
+                task_tx
+            }),
+        );
+
+        tester.assert_transition(
+            TaskTestEvent::DrvRespTxNoAck,
+            TaskTestTransition::DrvReqTx(&|task_tx, result| {
+                // TODO check timestamps
+                match result.unwrap() {
+                    TransmissionResult::Retransmitting(attempt) => {
+                        assert_eq!(attempt, 2);
+                    }
+                    _ => unreachable!("Expected Retransmitting state in Transmission Task"),
+                };
+                task_tx
+            }),
+        );
+        tester.assert_transition(
+            TaskTestEvent::DrvRespTxCcaBusy,
+            TaskTestTransition::DrvReqTx(&|task_tx, _result| {
+                // TODO check timestamps
+                task_tx
+            }),
+        );
+
+        tester.assert_transition(
+            TaskTestEvent::DrvRespTxNoAck,
+            TaskTestTransition::TaskTerminated(&|result| match result {
+                TransmissionResult::NoAck(radio_frame) => {
+                    unsafe { radio_frame.into_buffer().consume() };
+                }
+                _ => unreachable!("Unexpected Transmission task result"),
+            }),
+        );
+    }
+
+    #[test]
+    fn transmission_multiple_retransmission_success() {
+        // Allocating non-droppable buffer
+        const BUF_LEN: usize = 127;
+        static mut BUFFER: [u8; BUF_LEN] = [0; BUF_LEN];
+        // Dataframe used by the state machine
+        #[allow(static_mut_refs)]
+        let radio_frame = unsafe { generate_data_frame(&mut BUFFER) };
+
+        // Fake RNG with predefined sequence of numbers
+        let arbitrary_sequence = [1, 2, 4, 0];
+        let mut rng = FakeRng::new(&arbitrary_sequence);
+
+        let context = RefCell::new(MacSvcContext {
+            pib: Pib::default(),
+            rng: &mut rng,
+            timer: FakeRadioTimer::new(),
+        });
+        let task = TransmissionTask::<FakeDriverConfig>::new(
+            MpduFrame::from_radio_frame(radio_frame),
+            &context,
+        );
+
+        context.borrow_mut().pib.max_csma_backoffs = 1;
+        context.borrow_mut().pib.max_frame_retries = 2;
+
+        let mut tester = TaskTester::new(task);
+
+        // First attempt
+        tester.assert_transition(
+            TaskTestEvent::TaskEntry,
+            TaskTestTransition::DrvReqTx(&|task_tx, _result| {
+                // TODO check timestamps
+                // assert_eq!(task_tx.at, Timestamp::Scheduled(Instant::new(0)));
+                task_tx
+            }),
+        );
+        tester.assert_transition(
+            TaskTestEvent::DrvRespTxCcaBusy,
+            TaskTestTransition::DrvReqTx(&|task_tx, _result| {
+                // TODO check timestamps
+                task_tx
+            }),
+        );
+
+        // Second attempt, first retransmission
+        tester.assert_transition(
+            TaskTestEvent::DrvRespTxNoAck,
+            TaskTestTransition::DrvReqTx(&|task_tx, result| {
+                // TODO check timestamps
+                match result.unwrap() {
+                    TransmissionResult::Retransmitting(attempt) => {
+                        assert_eq!(attempt, 2);
+                    }
+                    _ => unreachable!("Expected Retransmitting state in Transmission Task"),
+                };
+                task_tx
+            }),
+        );
+        tester.assert_transition(
+            TaskTestEvent::DrvRespTxCcaBusy,
+            TaskTestTransition::DrvReqTx(&|task_tx, _result| {
+                // TODO check timestamps
+                task_tx
+            }),
+        );
+
+        // Third attempt, second retransmission
+        tester.assert_transition(
+            TaskTestEvent::DrvRespTxNoAck,
+            TaskTestTransition::DrvReqTx(&|task_tx, result| {
+                // TODO check timestamps
+                match result.unwrap() {
+                    TransmissionResult::Retransmitting(attempt) => {
+                        assert_eq!(attempt, 3);
+                    }
+                    _ => unreachable!("Expected Retransmitting state in Transmission Task"),
+                };
+                task_tx
+            }),
+        );
+
+        tester.assert_transition(
+            TaskTestEvent::DrvRespTxSent,
+            TaskTestTransition::TaskTerminated(&|result| match result {
+                TransmissionResult::Sent(radio_frame) => {
+                    unsafe { radio_frame.into_buffer().consume() };
+                }
+                _ => unreachable!("Unexpected Transmission task result"),
+            }),
+        );
+    }
+
+    #[test]
+    fn transmission_multiple_retransmission_failure() {
+        // Allocating non-droppable buffer
+        const BUF_LEN: usize = 127;
+        static mut BUFFER: [u8; BUF_LEN] = [0; BUF_LEN];
+        // Dataframe used by the state machine
+        #[allow(static_mut_refs)]
+        let radio_frame = unsafe { generate_data_frame(&mut BUFFER) };
+
+        // Fake RNG with predefined sequence of numbers
+        let arbitrary_sequence = [1, 2, 4, 0];
+        let mut rng = FakeRng::new(&arbitrary_sequence);
+
+        let context = RefCell::new(MacSvcContext {
+            pib: Pib::default(),
+            rng: &mut rng,
+            timer: FakeRadioTimer::new(),
+        });
+        let task = TransmissionTask::<FakeDriverConfig>::new(
+            MpduFrame::from_radio_frame(radio_frame),
+            &context,
+        );
+
+        context.borrow_mut().pib.max_csma_backoffs = 1;
+        context.borrow_mut().pib.max_frame_retries = 2;
+
+        let mut tester = TaskTester::new(task);
+
+        // First attempt
+        tester.assert_transition(
+            TaskTestEvent::TaskEntry,
+            TaskTestTransition::DrvReqTx(&|task_tx, _result| {
+                // TODO check timestamps
+                // assert_eq!(task_tx.at, Timestamp::Scheduled(Instant::new(0)));
+                task_tx
+            }),
+        );
+        tester.assert_transition(
+            TaskTestEvent::DrvRespTxCcaBusy,
+            TaskTestTransition::DrvReqTx(&|task_tx, _result| {
+                // TODO check timestamps
+                task_tx
+            }),
+        );
+
+        // Second attempt, first retransmission
+        tester.assert_transition(
+            TaskTestEvent::DrvRespTxNoAck,
+            TaskTestTransition::DrvReqTx(&|task_tx, result| {
+                // TODO check timestamps
+                match result.unwrap() {
+                    TransmissionResult::Retransmitting(attempt) => {
+                        assert_eq!(attempt, 2);
+                    }
+                    _ => unreachable!("Expected Retransmitting state in Transmission Task"),
+                };
+                task_tx
+            }),
+        );
+        tester.assert_transition(
+            TaskTestEvent::DrvRespTxCcaBusy,
+            TaskTestTransition::DrvReqTx(&|task_tx, _result| {
+                // TODO check timestamps
+                task_tx
+            }),
+        );
+
+        // Third attempt, second retransmission
+        tester.assert_transition(
+            TaskTestEvent::DrvRespTxNoAck,
+            TaskTestTransition::DrvReqTx(&|task_tx, result| {
+                // TODO check timestamps
+                match result.unwrap() {
+                    TransmissionResult::Retransmitting(attempt) => {
+                        assert_eq!(attempt, 3);
+                    }
+                    _ => unreachable!("Expected Retransmitting state in Transmission Task"),
+                };
+                task_tx
+            }),
+        );
+        tester.assert_transition(
+            TaskTestEvent::DrvRespTxCcaBusy,
+            TaskTestTransition::DrvReqTx(&|task_tx, _result| {
+                // TODO check timestamps
+                task_tx
+            }),
+        );
+
+        tester.assert_transition(
+            TaskTestEvent::DrvRespTxCcaBusy,
+            TaskTestTransition::TaskTerminated(&|result| match result {
+                TransmissionResult::ChannelAccessFailure(radio_frame) => {
+                    unsafe { radio_frame.into_buffer().consume() };
+                }
+                _ => unreachable!("Unexpected Transmission task result"),
+            }),
+        );
+    }
+}
