@@ -232,3 +232,332 @@ impl<'task, RadioDriverImpl: DriverConfig> MacTask
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use core::cell::RefCell;
+    use dot15d4_driver::constants::MAC_UNIT_BACKOFF_PERIOD;
+    use dot15d4_driver::tasks::Timestamp;
+    use dot15d4_driver::timer::RadioTimerApi;
+    use dot15d4_util::allocator::IntoBuffer;
+
+    use crate::mac::csma::TransmitWithCsmaCaResult;
+    use crate::mac::pib::Pib;
+    use crate::mac::tests::{
+        generate_data_frame, FakeDriverConfig, FakeRadioTimer, FakeRng, TaskTestEvent,
+        TaskTestTransition, TaskTester,
+    };
+    use crate::mac::MacSvcContext;
+
+    use super::TransmitWithCsmaCaTask;
+    use super::CSMA_CA_TX_GUARD_TIME;
+
+    #[test]
+    fn csma_ca_no_backoff_success() {
+        // Allocating non-droppable buffer
+        const BUF_LEN: usize = 127;
+        static mut BUFFER: [u8; BUF_LEN] = [0; BUF_LEN];
+        // Dataframe used by the state machine
+        let radio_frame = unsafe { generate_data_frame(&mut BUFFER) };
+
+        // Fake RNG with predefined sequence of numbers
+        let arbitrary_sequence = [1, 2, 4, 0];
+        let mut rng = FakeRng::new(&arbitrary_sequence);
+
+        let context = RefCell::new(MacSvcContext {
+            pib: Pib::default(),
+            rng: &mut rng,
+            timer: FakeRadioTimer::new(),
+        });
+        let task = TransmitWithCsmaCaTask::<FakeDriverConfig>::new(radio_frame, &context);
+
+        let mut tester = TaskTester::new(task);
+
+        tester.assert_transition(
+            TaskTestEvent::TaskEntry,
+            TaskTestTransition::DrvReqTx(&|task_tx, _result| {
+                let expected_timestamp = context
+                    .borrow()
+                    .timer
+                    .now()
+                    .checked_add_duration(CSMA_CA_TX_GUARD_TIME)
+                    .unwrap()
+                    .checked_add_duration(MAC_UNIT_BACKOFF_PERIOD * (arbitrary_sequence[0] as u32))
+                    .unwrap();
+                assert_eq!(task_tx.at, Timestamp::Scheduled(expected_timestamp));
+                context.borrow_mut().timer.update(expected_timestamp);
+                task_tx
+            }),
+        );
+
+        tester.assert_transition(
+            TaskTestEvent::DrvRespTxSent,
+            TaskTestTransition::TaskTerminated(&|result| match result {
+                TransmitWithCsmaCaResult::Sent(radio_frame, _) => {
+                    unsafe { radio_frame.into_buffer().consume() };
+                }
+                _ => panic!("Unexpected CSMA/CA result"),
+            }),
+        );
+    }
+
+    #[test]
+    fn csma_ca_no_backoff_failure() {
+        // Allocating non-droppable buffer
+        const BUF_LEN: usize = 127;
+        static mut BUFFER: [u8; BUF_LEN] = [0; BUF_LEN];
+        // Dataframe used by the state machine
+        let radio_frame = unsafe { generate_data_frame(&mut BUFFER) };
+
+        // Fake RNG with predefined sequence of numbers
+        let arbitrary_sequence = [1, 2, 4, 0];
+        let mut rng = FakeRng::new(&arbitrary_sequence);
+
+        let context = RefCell::new(MacSvcContext {
+            pib: Pib::default(),
+            rng: &mut rng,
+            timer: FakeRadioTimer::new(),
+        });
+
+        context.borrow_mut().pib.max_csma_backoffs = 1;
+
+        let task = TransmitWithCsmaCaTask::<FakeDriverConfig>::new(radio_frame, &context);
+
+        let mut tester = TaskTester::new(task);
+
+        tester.assert_transition(
+            TaskTestEvent::TaskEntry,
+            TaskTestTransition::DrvReqTx(&|task_tx, _result| {
+                let expected_timestamp = context
+                    .borrow()
+                    .timer
+                    .now()
+                    .checked_add_duration(CSMA_CA_TX_GUARD_TIME)
+                    .unwrap()
+                    .checked_add_duration(MAC_UNIT_BACKOFF_PERIOD * (arbitrary_sequence[0] as u32))
+                    .unwrap();
+                assert_eq!(task_tx.at, Timestamp::Scheduled(expected_timestamp));
+                context.borrow_mut().timer.update(expected_timestamp);
+                task_tx
+            }),
+        );
+
+        tester.assert_transition(
+            TaskTestEvent::DrvRespTxCcaBusy,
+            TaskTestTransition::DrvReqTx(&|task_tx, _result| {
+                let expected_timestamp = context
+                    .borrow()
+                    .timer
+                    .now()
+                    .checked_add_duration(CSMA_CA_TX_GUARD_TIME)
+                    .unwrap()
+                    .checked_add_duration(MAC_UNIT_BACKOFF_PERIOD * (arbitrary_sequence[1] as u32))
+                    .unwrap();
+                assert_eq!(task_tx.at, Timestamp::Scheduled(expected_timestamp));
+                context.borrow_mut().timer.update(expected_timestamp);
+                task_tx
+            }),
+        );
+
+        tester.assert_transition(
+            TaskTestEvent::DrvRespTxCcaBusy,
+            TaskTestTransition::TaskTerminated(&|result| match result {
+                TransmitWithCsmaCaResult::ChannelAccessFailure(radio_frame) => {
+                    unsafe { radio_frame.into_buffer().consume() };
+                }
+                _ => panic!("Unexpected CSMA/CA result"),
+            }),
+        );
+    }
+
+    #[test]
+    fn csma_ca_no_backoff_noack() {
+        // Allocating non-droppable buffer
+        const BUF_LEN: usize = 127;
+        static mut BUFFER: [u8; BUF_LEN] = [0; BUF_LEN];
+        // Dataframe used by the state machine
+        let radio_frame = unsafe { generate_data_frame(&mut BUFFER) };
+
+        // Fake RNG with predefined sequence of numbers
+        let arbitrary_sequence = [1, 2, 4, 0];
+        let mut rng = FakeRng::new(&arbitrary_sequence);
+
+        let context = RefCell::new(MacSvcContext {
+            pib: Pib::default(),
+            rng: &mut rng,
+            timer: FakeRadioTimer::new(),
+        });
+
+        let task = TransmitWithCsmaCaTask::<FakeDriverConfig>::new(radio_frame, &context);
+
+        let mut tester = TaskTester::new(task);
+
+        tester.assert_transition(
+            TaskTestEvent::TaskEntry,
+            TaskTestTransition::DrvReqTx(&|task_tx, _result| {
+                let expected_timestamp = context
+                    .borrow()
+                    .timer
+                    .now()
+                    .checked_add_duration(CSMA_CA_TX_GUARD_TIME)
+                    .unwrap()
+                    .checked_add_duration(MAC_UNIT_BACKOFF_PERIOD * (arbitrary_sequence[0] as u32))
+                    .unwrap();
+                assert_eq!(task_tx.at, Timestamp::Scheduled(expected_timestamp));
+                context.borrow_mut().timer.update(expected_timestamp);
+                task_tx
+            }),
+        );
+
+        tester.assert_transition(
+            TaskTestEvent::DrvRespTxNoAck,
+            TaskTestTransition::TaskTerminated(&|result| {
+                // TODO check timestamps
+                match result {
+                    TransmitWithCsmaCaResult::NoAck(radio_frame) => {
+                        unsafe { radio_frame.into_buffer().consume() };
+                    }
+                    _ => panic!("Unexpected CSMA/CA result"),
+                }
+            }),
+        );
+    }
+
+    #[test]
+    fn csma_ca_single_backoff() {
+        // Allocating non-droppable buffer
+        const BUF_LEN: usize = 127;
+        static mut BUFFER: [u8; BUF_LEN] = [0; BUF_LEN];
+        // Dataframe used by the state machine
+        let radio_frame = unsafe { generate_data_frame(&mut BUFFER) };
+
+        // Fake RNG with predefined sequence of numbers
+        let arbitrary_sequence = [2, 1, 4, 0];
+        let mut rng = FakeRng::new(&arbitrary_sequence);
+
+        let context = RefCell::new(MacSvcContext {
+            pib: Pib::default(),
+            rng: &mut rng,
+            timer: FakeRadioTimer::new(),
+        });
+
+        let task = TransmitWithCsmaCaTask::<FakeDriverConfig>::new(radio_frame, &context);
+
+        let mut tester = TaskTester::new(task);
+
+        tester.assert_transition(
+            TaskTestEvent::TaskEntry,
+            TaskTestTransition::DrvReqTx(&|task_tx, _result| {
+                let expected_timestamp = context
+                    .borrow()
+                    .timer
+                    .now()
+                    .checked_add_duration(CSMA_CA_TX_GUARD_TIME)
+                    .unwrap()
+                    .checked_add_duration(MAC_UNIT_BACKOFF_PERIOD * (arbitrary_sequence[0] as u32))
+                    .unwrap();
+                assert_eq!(task_tx.at, Timestamp::Scheduled(expected_timestamp));
+                context.borrow_mut().timer.update(expected_timestamp);
+                task_tx
+            }),
+        );
+
+        tester.assert_transition(
+            TaskTestEvent::DrvRespTxCcaBusy,
+            TaskTestTransition::DrvReqTx(&|task_tx, result| {
+                let expected_timestamp = context
+                    .borrow()
+                    .timer
+                    .now()
+                    .checked_add_duration(CSMA_CA_TX_GUARD_TIME)
+                    .unwrap()
+                    .checked_add_duration(MAC_UNIT_BACKOFF_PERIOD * (arbitrary_sequence[1] as u32))
+                    .unwrap();
+                assert_eq!(task_tx.at, Timestamp::Scheduled(expected_timestamp));
+                assert_eq!(result.unwrap(), TransmitWithCsmaCaResult::CsmaCaBackoff(1));
+                context.borrow_mut().timer.update(expected_timestamp);
+                task_tx
+            }),
+        );
+
+        tester.assert_transition(
+            TaskTestEvent::DrvRespTxSent,
+            TaskTestTransition::TaskTerminated(&|result| match result {
+                TransmitWithCsmaCaResult::Sent(radio_frame, _) => {
+                    unsafe { radio_frame.into_buffer().consume() };
+                }
+                _ => panic!("Unexpected CSMA/CA result"),
+            }),
+        );
+    }
+
+    #[test]
+    fn csma_ca_max_backoffs() {
+        // Allocating non-droppable buffer
+        const BUF_LEN: usize = 127;
+        static mut BUFFER: [u8; BUF_LEN] = [0; BUF_LEN];
+        // Dataframe used by the state machine
+        let radio_frame = unsafe { generate_data_frame(&mut BUFFER) };
+
+        // Fake RNG with predefined sequence of numbers
+        let arbitrary_sequence = [1, 2, 4, 0];
+        let mut rng = FakeRng::new(&arbitrary_sequence);
+
+        let context = RefCell::new(MacSvcContext {
+            pib: Pib::default(),
+            rng: &mut rng,
+            timer: FakeRadioTimer::new(),
+        });
+
+        context.borrow_mut().pib.max_csma_backoffs = 1;
+
+        let task = TransmitWithCsmaCaTask::<FakeDriverConfig>::new(radio_frame, &context);
+
+        let mut tester = TaskTester::new(task);
+
+        tester.assert_transition(
+            TaskTestEvent::TaskEntry,
+            TaskTestTransition::DrvReqTx(&|task_tx, _result| {
+                let expected_timestamp = context
+                    .borrow()
+                    .timer
+                    .now()
+                    .checked_add_duration(CSMA_CA_TX_GUARD_TIME)
+                    .unwrap()
+                    .checked_add_duration(MAC_UNIT_BACKOFF_PERIOD * (arbitrary_sequence[0] as u32))
+                    .unwrap();
+                assert_eq!(task_tx.at, Timestamp::Scheduled(expected_timestamp));
+                context.borrow_mut().timer.update(expected_timestamp);
+                task_tx
+            }),
+        );
+
+        tester.assert_transition(
+            TaskTestEvent::DrvRespTxCcaBusy,
+            TaskTestTransition::DrvReqTx(&|task_tx, result| {
+                let expected_timestamp = context
+                    .borrow()
+                    .timer
+                    .now()
+                    .checked_add_duration(CSMA_CA_TX_GUARD_TIME)
+                    .unwrap()
+                    .checked_add_duration(MAC_UNIT_BACKOFF_PERIOD * (arbitrary_sequence[1] as u32))
+                    .unwrap();
+                assert_eq!(task_tx.at, Timestamp::Scheduled(expected_timestamp));
+                assert_eq!(result.unwrap(), TransmitWithCsmaCaResult::CsmaCaBackoff(1));
+                context.borrow_mut().timer.update(expected_timestamp);
+                task_tx
+            }),
+        );
+
+        tester.assert_transition(
+            TaskTestEvent::DrvRespTxCcaBusy,
+            TaskTestTransition::TaskTerminated(&|result| match result {
+                TransmitWithCsmaCaResult::ChannelAccessFailure(radio_frame) => {
+                    unsafe { radio_frame.into_buffer().consume() };
+                }
+                _ => panic!("Unexpected CSMA/CA result"),
+            }),
+        );
+    }
+}
