@@ -539,6 +539,7 @@ mod tests {
         type Tailroom = U2;
         type MaxSduLength = U<PHY_MAX_PACKET_SIZE_127>;
         type Fcs = FcsTwoBytes;
+        type TxGuardTime = U<150>;
         type Timer = FakeRadioTimer;
     }
 

@@ -1,6 +1,7 @@
 use core::fmt::Debug;
 
 use generic_array::ArrayLength;
+use typenum::Unsigned;
 
 use crate::timer::RadioTimerApi;
 
@@ -41,6 +42,10 @@ pub trait DriverConfig {
     /// aMaxPhyPacketSize if the FCS is handled by the MAC, otherwise
     /// aMaxPhyPacketSize minus the FCS size.
     type MaxSduLength: ArrayLength;
+
+    /// Minimum duration, in us, necessary by the driver to go from any radio
+    /// state to TX ready.
+    type TxGuardTime: Unsigned;
 
     /// FCS handling:
     ///  - [`FcsTwoBytes`]: No FCS handling inside the driver or hardware. The
