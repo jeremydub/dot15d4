@@ -657,9 +657,33 @@ impl RadioState<TaskRx> for RadioDriver<NrfRadioDriver, TaskRx> {
 
         if let Some(timed_completion) = timed_completion {
             unsafe {
-                self.timer()
+                match self
+                    .timer()
                     .wait_until(timed_completion.instant, Some(timed_completion.signal))
-                    .await;
+                    .await
+                {
+                    RadioTimerResult::Ok => {}
+                    RadioTimerResult::Overdue => {
+                        // TODO: should we check if ongoing reception, if so,
+                        // what to do ? disable anyway ?
+                        // Since the timed completion is too close in time, we actively
+                        // cancel sooner than scheduled the ongoing task and disable the receiver.
+                        r.tasks_disable.write(|w| w.tasks_disable().set_bit());
+                        // Wait until the radio is disabled.
+                        self.inner
+                            .executor
+                            .spawn(poll_fn(|_| {
+                                if r.events_disabled.read().events_disabled().bit_is_set() {
+                                    r.intenclr.write(|w| w.disabled().set_bit());
+                                    Poll::Ready(())
+                                } else {
+                                    r.intenset.write(|w| w.disabled().set_bit());
+                                    Poll::Pending
+                                }
+                            }))
+                            .await;
+                    }
+                }
             }
         } else {
             // Read the framestart event at the last possible moment to minimize the
