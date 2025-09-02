@@ -267,14 +267,16 @@ impl RadioTask for TaskTx {
 /// Currently just a placeholder - may report more specific scheduling errors
 /// later on.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub struct SchedulingError<Task>(pub Task);
+pub struct SchedulingError<Task> {
+    pub task: Task,
+}
 
 /// Represents a radio task or scheduling error.
 #[derive(Debug, PartialEq, Eq)]
 pub enum RadioTaskError<Task: RadioTask> {
     /// Any interaction with the radio may fail and the scheduler will have to
     /// deal with this.
-    Scheduling(SchedulingError<Task>),
+    Scheduling(Task),
 
     /// The radio task itself failed.
     Task(Task::Error),
@@ -790,7 +792,7 @@ where
 
             return CompletedRadioTransition::Rollback(
                 self.from_radio,
-                RadioTaskError::Scheduling(scheduling_error),
+                RadioTaskError::Scheduling(scheduling_error.task),
                 None,
                 self.next_task,
             );
@@ -822,7 +824,7 @@ where
 
             return CompletedRadioTransition::Rollback(
                 self.from_radio,
-                RadioTaskError::Scheduling(scheduling_error),
+                RadioTaskError::Scheduling(scheduling_error.task),
                 Some(prev_task_result),
                 self.next_task,
             );
@@ -835,7 +837,7 @@ where
             let _ = (self.cleanup)();
             return CompletedRadioTransition::Rollback(
                 self.from_radio,
-                RadioTaskError::Scheduling(scheduling_error),
+                RadioTaskError::Scheduling(scheduling_error.task),
                 Some(prev_task_result),
                 self.next_task,
             );
@@ -940,7 +942,7 @@ where
         if let Err(scheduling_error) = (self.on_scheduled)() {
             return CompletedRadioTransition::Rollback(
                 self.from_radio,
-                RadioTaskError::Scheduling(scheduling_error),
+                RadioTaskError::Scheduling(scheduling_error.task),
                 None,
                 self.next_task,
             );
@@ -966,7 +968,7 @@ where
         if let Err(scheduling_error) = (self.on_completed)() {
             return CompletedRadioTransition::Rollback(
                 self.from_radio,
-                RadioTaskError::Scheduling(scheduling_error),
+                RadioTaskError::Scheduling(scheduling_error.task),
                 Some(prev_task_result),
                 self.next_task,
             );

@@ -601,9 +601,7 @@ impl RadioState<TaskRx> for RadioDriver<NrfRadioDriver, TaskRx> {
         if let Some(timed_transition) = timed_transition {
             let result = unsafe { self.timer().schedule_event(timed_transition) };
             if matches!(result, RadioTimerResult::Overdue) {
-                return Err(RadioTaskError::Scheduling(SchedulingError(
-                    self.task.take().unwrap(),
-                )));
+                return Err(RadioTaskError::Scheduling(self.task.take().unwrap()));
             }
         }
 
@@ -1217,9 +1215,7 @@ impl RadioState<TaskTx> for RadioDriver<NrfRadioDriver, TaskTx> {
         if let Some(timed_transition) = timed_transition {
             let result = unsafe { self.timer().schedule_event(timed_transition) };
             if matches!(result, RadioTimerResult::Overdue) {
-                return Err(RadioTaskError::Scheduling(SchedulingError(
-                    self.task.take().unwrap(),
-                )));
+                return Err(RadioTaskError::Scheduling(self.task.take().unwrap()));
             }
         }
 

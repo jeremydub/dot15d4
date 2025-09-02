@@ -94,9 +94,8 @@ impl From<DrvSvcTaskRx> for DrvSvcRequest {
 /// Represents a driver service task error.
 #[derive(Debug, PartialEq, Eq)]
 pub enum DrvSvcTaskError<Task: DriverServiceTask> {
-    /// Any interaction with the radio may fail and clients will have to deal
-    /// with this.
-    RadioError,
+    /// The task could not be scheduled in time
+    SchedulingError(Task),
 
     /// The driver service task itself failed.
     Task(Task::Error),
@@ -124,7 +123,9 @@ impl From<OffResult> for DrvSvcResponse {
 impl From<RadioTaskError<RadioTaskOff>> for DrvSvcResponse {
     fn from(value: RadioTaskError<RadioTaskOff>) -> Self {
         match value {
-            RadioTaskError::Scheduling(_) => DrvSvcResponse::Off(Err(DrvSvcTaskError::RadioError)),
+            RadioTaskError::Scheduling(off_task) => {
+                DrvSvcResponse::Off(Err(DrvSvcTaskError::SchedulingError(off_task)))
+            }
             RadioTaskError::Task(off_error) => {
                 DrvSvcResponse::Off(Err(DrvSvcTaskError::Task(off_error)))
             }
@@ -141,7 +142,9 @@ impl From<TxResult> for DrvSvcResponse {
 impl From<RadioTaskError<RadioTaskTx>> for DrvSvcResponse {
     fn from(value: RadioTaskError<RadioTaskTx>) -> Self {
         match value {
-            RadioTaskError::Scheduling(_) => DrvSvcResponse::Tx(Err(DrvSvcTaskError::RadioError)),
+            RadioTaskError::Scheduling(tx_task) => {
+                DrvSvcResponse::Tx(Err(DrvSvcTaskError::SchedulingError(tx_task)))
+            }
             RadioTaskError::Task(tx_error) => {
                 DrvSvcResponse::Tx(Err(DrvSvcTaskError::Task(tx_error)))
             }
@@ -158,7 +161,9 @@ impl From<RxResult> for DrvSvcResponse {
 impl From<RadioTaskError<RadioTaskRx>> for DrvSvcResponse {
     fn from(value: RadioTaskError<RadioTaskRx>) -> Self {
         match value {
-            RadioTaskError::Scheduling(_) => DrvSvcResponse::Rx(Err(DrvSvcTaskError::RadioError)),
+            RadioTaskError::Scheduling(rx_task) => {
+                DrvSvcResponse::Rx(Err(DrvSvcTaskError::SchedulingError(rx_task)))
+            }
             RadioTaskError::Task(rx_error) => {
                 DrvSvcResponse::Rx(Err(DrvSvcTaskError::Task(rx_error)))
             }
