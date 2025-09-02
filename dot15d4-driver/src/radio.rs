@@ -2,7 +2,7 @@ use core::fmt::Debug;
 
 use generic_array::ArrayLength;
 
-use crate::timer::RadioTimerApi;
+use crate::timer::{LocalClockDuration, RadioTimerApi};
 
 pub mod export {
     pub use generic_array::ArrayLength;
@@ -41,6 +41,13 @@ pub trait DriverConfig {
     /// aMaxPhyPacketSize if the FCS is handled by the MAC, otherwise
     /// aMaxPhyPacketSize minus the FCS size.
     type MaxSduLength: ArrayLength;
+
+    /// Worst-case guard time required when scheduling a timed radio task. This
+    /// is the longest time it may take from calling `XXState::schedule_XX()`
+    /// to the corresponding RMARKER of the scheduled RX/TX frame. This
+    /// includes the `XXState::schedule_off()` case, which is assumed to be
+    /// faster.
+    const GUARD_TIME: LocalClockDuration;
 
     /// FCS handling:
     ///  - [`FcsTwoBytes`]: No FCS handling inside the driver or hardware. The

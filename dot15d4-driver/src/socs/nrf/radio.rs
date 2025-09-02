@@ -80,12 +80,29 @@ const _: () = assert!(PHY_CCA_DURATION.ticks() == 8);
 const T_TXEN: LocalClockDuration = LocalClockDuration::micros(130);
 // Disabled to Rx Idle duration
 const T_RXEN: LocalClockDuration = LocalClockDuration::micros(130);
+// Disable to Disabled duration
+const T_RXDIS: LocalClockDuration = LocalClockDuration::nanos(500);
 // CCA duration
 const T_CCA: LocalClockDuration = PHY_CCA_DURATION.convert();
-// Rx-to-Tx and Tx-to-Rx duration
-const T_TURNAROUND: LocalClockDuration = LocalClockDuration::micros(130);
+// nRF specific timing for transitioning from CCA to TX enable
+const T_CCA_TO_TXEN: LocalClockDuration = LocalClockDuration::micros(130);
 // SHR duration: preamble (8 symbols) + SFD (2 symbols)
 const T_SHR: LocalClockDuration = SymbolsOQpsk250Duration::from_ticks(10).convert();
+
+// RMARKER offset without CCA: Disabled -> Tx -> SHR
+const OFFSET_DIS_TO_TX_NO_CCA: LocalClockDuration = T_TXEN.checked_add(T_SHR).unwrap();
+// RMARKER offset with CCA: Disabled -> Rx -> CCA -> Turnaround -> SHR
+const OFFSET_DIS_TO_TX_W_CCA: LocalClockDuration = OFFSET_DIS_TO_TX_NO_CCA
+    .checked_add(T_CCA)
+    .unwrap()
+    .checked_add(T_CCA_TO_TXEN)
+    .unwrap();
+// RMARKER offset: Disabled -> Rx -> SHR
+const OFFSET_DIS_TO_RX: LocalClockDuration = T_RXEN.checked_add(T_SHR).unwrap();
+
+/// Worst-case guard time required when scheduling a timed radio task. In this
+/// driver, it is scheduling a TX with CCA from RX.
+const GUARD_TIME: LocalClockDuration = OFFSET_DIS_TO_TX_W_CCA.checked_add(T_RXDIS).unwrap();
 
 /// This struct serves multiple purposes:
 /// 1. It provides access to private radio driver state across typestates of the
@@ -98,6 +115,7 @@ pub struct NrfRadioDriver {
 }
 
 impl DriverConfig for NrfRadioDriver {
+    const GUARD_TIME: LocalClockDuration = GUARD_TIME;
     type Headroom = U<PHY_HDR_LEN>; // Headroom for the PHY header (packet length).
     type Tailroom = U<FCS_LEN>; // Tailroom for driver-level FCS handling.
     type MaxSduLength = U<{ PHY_MAX_PACKET_SIZE_127 - FCS_LEN }>; // The FCS is handled by the driver and must not be part of the MAC's MPDU.
@@ -149,10 +167,8 @@ impl<Task> RadioDriver<NrfRadioDriver, Task> {
 
     const fn timed_dis_to_rx(rx_task: &TaskRx) -> Option<TimedSignal> {
         if let Timestamp::Scheduled(rx_timestamp) = rx_task.start {
-            // RMARKER offset: Disabled -> Rx -> SHR
-            const OFFSET: LocalClockDuration = T_RXEN.checked_add(T_SHR).unwrap();
             Some(TimedSignal::new(
-                rx_timestamp.checked_sub_duration(OFFSET).unwrap(),
+                rx_timestamp.checked_sub_duration(OFFSET_DIS_TO_RX).unwrap(),
                 HardwareSignal::RadioRxEnable,
             ))
         } else {
@@ -163,14 +179,6 @@ impl<Task> RadioDriver<NrfRadioDriver, Task> {
     const fn timed_dis_to_tx(tx_task: &TaskTx) -> Option<TimedSignal> {
         if let Timestamp::Scheduled(tx_timestamp) = tx_task.at {
             let timed_signal = if tx_task.cca {
-                // RMARKER offset with CCA: Disabled -> Rx -> CCA -> Turnaround -> SHR
-                const OFFSET_DIS_TO_TX_W_CCA: LocalClockDuration = T_RXEN
-                    .checked_add(T_CCA)
-                    .unwrap()
-                    .checked_add(T_TURNAROUND)
-                    .unwrap()
-                    .checked_add(T_SHR)
-                    .unwrap();
                 TimedSignal::new(
                     tx_timestamp
                         .checked_sub_duration(OFFSET_DIS_TO_TX_W_CCA)
@@ -178,9 +186,6 @@ impl<Task> RadioDriver<NrfRadioDriver, Task> {
                     HardwareSignal::RadioRxEnable,
                 )
             } else {
-                // RMARKER offset without CCA: Disabled -> Tx -> SHR
-                const OFFSET_DIS_TO_TX_NO_CCA: LocalClockDuration =
-                    T_TXEN.checked_add(T_SHR).unwrap();
                 TimedSignal::new(
                     tx_timestamp
                         .checked_sub_duration(OFFSET_DIS_TO_TX_NO_CCA)
@@ -1186,7 +1191,7 @@ impl RadioDriver<NrfRadioDriver, TaskTx> {
                 const OFFSET_TX_TO_TX_W_CCA: LocalClockDuration = T_RXEN
                     .checked_add(T_CCA)
                     .unwrap()
-                    .checked_add(T_TURNAROUND)
+                    .checked_add(T_CCA_TO_TXEN)
                     .unwrap()
                     .checked_add(T_SHR)
                     .unwrap();
