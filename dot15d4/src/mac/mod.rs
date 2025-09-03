@@ -8,7 +8,11 @@ mod task;
 mod transmission;
 mod tsch;
 
+use dot15d4_driver::timer::{LocalClockDuration, LocalClockInstant, RadioTimerApi};
 pub use dot15d4_frame as frame;
+
+use embassy_sync::{blocking_mutex::raw::NoopRawMutex, signal::Signal};
+use heapless::binary_heap::Min;
 use rand_core::RngCore;
 
 use core::cell::RefCell;
@@ -20,7 +24,7 @@ use crate::{
         constants::PHY_MAX_PACKET_SIZE_127,
         frame::FrameType,
         radio::{DriverConfig, MAX_DRIVER_OVERHEAD},
-        DriverRequestSender, DRIVER_CHANNEL_CAPACITY,
+        DriverRequestSender, DrvSvcRequest, DRIVER_CHANNEL_CAPACITY,
     },
     mac::mcps::data::DataRequestResult,
     util::{
@@ -183,6 +187,9 @@ struct MacServiceState<'state, RadioDriverImpl: DriverConfig> {
 
     // Response tokens for outstanding MAC requests.
     outstanding_mac_requests: [Option<ResponseToken>; MAC_NUM_PARALLEL_REQUEST_TASKS],
+
+    // Signal for passing a new driver request (with corresponding MAC task index)
+    driver_request_signal: Signal<NoopRawMutex, (DrvSvcRequest, usize)>,
 }
 
 impl<RadioDriverImpl: DriverConfig> MacServiceState<'_, RadioDriverImpl> {
@@ -192,6 +199,7 @@ impl<RadioDriverImpl: DriverConfig> MacServiceState<'_, RadioDriverImpl> {
             outstanding_driver_requests: heapless::Vec::new(),
             driver_msg_slot_to_task_index: [0; DRIVER_CHANNEL_CAPACITY],
             outstanding_mac_requests: [const { None }; MAC_NUM_PARALLEL_REQUEST_TASKS],
+            driver_request_signal: Signal::new(),
         }
     }
 }
@@ -297,6 +305,73 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
         }
     }
 
+    async fn run_requests_scheduler<'tasks>(
+        self,
+        state: &mut MacServiceState<'tasks, RadioDriverImpl>,
+    ) {
+        // Initial expiration instant is MAX value since no driver request to schedule
+        let mut next_expiration_instant = LocalClockInstant::from_ticks(u64::MAX);
+
+        // TODO: use DRIVER_CHANNEL_CAPACITY ?
+        // Priority queue for driver requests
+        const QUEUE_CAPACITY: usize = 4;
+        let mut driver_requests =
+            heapless::BinaryHeap::<(DrvSvcRequest, usize), Min, QUEUE_CAPACITY>::new();
+
+        loop {
+            match select(state.driver_request_signal.wait(), unsafe {
+                self.timer.wait_until(next_expiration_instant, None)
+            })
+            .await
+            {
+                Either::First((driver_request, mac_svc_task_index)) => {
+                    // Add to priority queue
+                    // TODO: handle queue full
+                    driver_requests
+                        .push((driver_request, mac_svc_task_index))
+                        .unwrap();
+
+                    // calculate new expiration instant
+                    if let Some((closest_request, _)) = driver_requests.peek() {
+                        if let Some(instant) = closest_request.rmarker() {
+                            next_expiration_instant =
+                                instant.checked_sub_duration(TIMER_GUARD_TIME).unwrap();
+                            // check if time between now and next is enough
+                            const TIMER_GUARD_TIME: LocalClockDuration =
+                                LocalClockDuration::micros(300);
+                            if next_expiration_instant < self.timer.now() + TIMER_GUARD_TIME {
+                                // TODO: schedule right away (?)
+                            }
+                        } else {
+                            // TODO: schedule best-effort right away
+                        }
+                    } else {
+                        // Security: A driver request has just been pushed
+                        unreachable!()
+                    }
+                }
+                Either::Second(timer_result) => {
+                    // Security: if timeout is triggered, driver_requests has at least one request
+                    let (driver_request, mac_svc_task_index) = driver_requests.pop().unwrap();
+                    // Safety: We reserved sufficient channel capacity.
+                    let driver_msg_token = self
+                        .driver_request_sender
+                        .try_allocate_request_token()
+                        .unwrap();
+                    let driver_response_token = self
+                        .driver_request_sender
+                        .send_request_polling_response(driver_msg_token, driver_request);
+                    state.driver_msg_slot_to_task_index
+                        [driver_response_token.message_slot() as usize] = mac_svc_task_index;
+                    state
+                        .outstanding_driver_requests
+                        .push(driver_response_token)
+                        .unwrap();
+                }
+            }
+        }
+    }
+
     fn step_task<'tasks>(
         &self,
         state: &mut MacServiceState<'tasks, RadioDriverImpl>,
@@ -308,20 +383,10 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
 
         let task_result = match mac_svc_task.step(event) {
             MacTaskTransition::DrvSvcRequest(updated_task, driver_request, intermediate_result) => {
-                // Safety: We reserved sufficient channel capacity.
-                let driver_msg_token = self
-                    .driver_request_sender
-                    .try_allocate_request_token()
-                    .unwrap();
-                let driver_response_token = self
-                    .driver_request_sender
-                    .send_request_polling_response(driver_msg_token, driver_request);
-                state.driver_msg_slot_to_task_index
-                    [driver_response_token.message_slot() as usize] = mac_svc_task_index;
+                // TODO: is Signal safe here ? Should we use our channel instead ?
                 state
-                    .outstanding_driver_requests
-                    .push(driver_response_token)
-                    .unwrap();
+                    .driver_request_signal
+                    .signal((driver_request, mac_svc_task_index));
                 state.mac_svc_tasks[mac_svc_task_index] = Some(updated_task);
                 intermediate_result.map(MacTaskResultType::Intermediate)
             }

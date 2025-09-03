@@ -32,6 +32,7 @@ use self::{
     timer::{LocalClockDuration, RadioTimerApi, SymbolsOQpsk250Duration},
 };
 
+use dot15d4_driver::timer::LocalClockInstant;
 pub use dot15d4_driver::*;
 
 // Currently we make no distinction in the implementation of driver service
@@ -79,6 +80,25 @@ pub enum DrvSvcRequest {
     Rx(DrvSvcTaskRx),
 }
 
+impl DrvSvcRequest {
+    /// In case of Tx, the time at which the RMARKER of the outbound frame SHALL pass the local
+    /// antenna.
+    /// In case of Rx, the earliest time at which a frame with this RMARKER passing the local
+    /// antenna SHALL be recognized.
+    pub(crate) fn rmarker(&self) -> Option<LocalClockInstant> {
+        match self {
+            DrvSvcRequest::Tx(task_tx) => match task_tx.at {
+                Timestamp::BestEffort => None,
+                Timestamp::Scheduled(instant) => Some(instant),
+            },
+            DrvSvcRequest::Rx(task_rx) => match task_rx.start {
+                Timestamp::BestEffort => None,
+                Timestamp::Scheduled(instant) => Some(instant),
+            },
+        }
+    }
+}
+
 impl From<DrvSvcTaskTx> for DrvSvcRequest {
     fn from(value: DrvSvcTaskTx) -> Self {
         DrvSvcRequest::Tx(value)
@@ -88,6 +108,20 @@ impl From<DrvSvcTaskTx> for DrvSvcRequest {
 impl From<DrvSvcTaskRx> for DrvSvcRequest {
     fn from(value: DrvSvcTaskRx) -> Self {
         DrvSvcRequest::Rx(value)
+    }
+}
+
+impl Ord for DrvSvcRequest {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        let ticks = self.rmarker();
+        let other_ticks = other.rmarker();
+        ticks.cmp(&other_ticks)
+    }
+}
+
+impl PartialOrd for DrvSvcRequest {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }
 
