@@ -72,7 +72,7 @@ where
     RadioDriver<RadioDriverImpl, TaskRx>: RxState<RadioDriverImpl> + RadioDriverApi,
     RadioDriver<RadioDriverImpl, TaskTx>: TxState<RadioDriverImpl> + RadioDriverApi,
 {
-    pub async fn run<'a>(&self, rng: &'a mut dyn RngCore) -> ! {
+    pub async fn run(&self, rng: &mut dyn RngCore) -> ! {
         let radio = self.radio.take().expect("already running");
         let timer = radio.timer();
         let device = Device::new(radio);

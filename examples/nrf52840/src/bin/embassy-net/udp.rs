@@ -5,7 +5,7 @@ use panic_probe as _;
 
 use dot15d4::driver::{
     radio::RadioDriver,
-    socs::nrf::{export::pac, NrfRadioDriver},
+    socs::nrf::NrfRadioDriver,
     timer::{LocalClockDuration, RadioTimerApi, RadioTimerResult},
 };
 use dot15d4_embassy::{
@@ -20,6 +20,10 @@ use embassy_net::{
 };
 use heapless::Vec;
 use nrf52840_hal::Rng;
+use rand_chacha::{
+    rand_core::{RngCore, SeedableRng},
+    ChaCha8Rng,
+};
 use static_cell::StaticCell;
 
 const FRAME_PERIOD: LocalClockDuration = LocalClockDuration::millis(10);
@@ -43,13 +47,23 @@ async fn main(spawner: Spawner) {
     );
     let buffer_allocator = mac_buffer_allocator!();
 
+    // Generate random number
+    let mut rng = Rng::new(peripherals.rng);
+    let mut seed = [0u8; 32];
+    rng.random(&mut seed);
+    // Pseudo-random number generator
+    // Much faster than RNG
+    let mut prng = ChaCha8Rng::from_seed(seed);
+    // 64-bit seed use for network stack
+    let network_seed = prng.next_u64();
+
     static RADIO_STACK: StaticCell<Ieee802154Stack<NrfRadioDriver>> = StaticCell::new();
     let radio_stack = RADIO_STACK.init(Ieee802154Stack::new(radio, buffer_allocator));
 
     let driver = radio_stack.driver();
 
     // We spawn the task that will control the CSMA task
-    let ieee802154_task = ieee802154_task(radio_stack, peripherals.rng).unwrap();
+    let ieee802154_task = ieee802154_task(radio_stack, prng).unwrap();
     #[cfg(feature = "rtos-trace")]
     ieee802154_task.metadata().set_name("dot15d4\0");
     spawner.spawn(ieee802154_task);
@@ -62,13 +76,12 @@ async fn main(spawner: Spawner) {
     });
 
     // Init network stack
-    let seed: u64 = 10; // XXX this should be random
     static NET_STACK_RESOURCES: StaticCell<embassy_net::StackResources<2>> = StaticCell::new();
     let (net_stack, net_runner) = embassy_net::new(
         driver,
         config,
         NET_STACK_RESOURCES.init(embassy_net::StackResources::<2>::new()),
-        seed,
+        network_seed,
     );
 
     // Launch network task
@@ -123,10 +136,9 @@ async fn main(spawner: Spawner) {
 #[embassy_executor::task]
 async fn ieee802154_task(
     radio_stack: &'static Ieee802154Stack<NrfRadioDriver>,
-    p_rng: pac::RNG,
+    mut prng: ChaCha8Rng,
 ) -> ! {
-    let mut rng = Rng::new(p_rng);
-    radio_stack.run(&mut rng).await
+    radio_stack.run(&mut prng).await
 }
 
 #[embassy_executor::task]
