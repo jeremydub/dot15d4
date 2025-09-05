@@ -1012,7 +1012,7 @@ where
                 }
                 DrvSvcRequest::Rx(rx_task) => {
                     match tx_driver
-                        .schedule_rx(rx_task, next_task_ifs)
+                        .schedule_rx(rx_task, Ifs::None)
                         .complete_and_transition()
                         .await
                     {
