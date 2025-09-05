@@ -52,7 +52,7 @@ pub const MAC_UNIT_BACKOFF_PERIOD: SymbolsOQpsk250Duration =
 /// O-QPSK symbol rate for 2.4G is 62.5kS/s, i.e. a symbol period of 16µs.
 /// SIFS: 12 symbols = 192µs
 pub const MAC_SIFS: SymbolsOQpsk250Duration = SymbolsOQpsk250Duration::from_ticks(12);
-/// LIFS: 40 symbols = 480µs
+/// LIFS: 40 symbols = 640µs
 pub const MAC_LIFS: SymbolsOQpsk250Duration = SymbolsOQpsk250Duration::from_ticks(40);
 /// AIFS=1ms, for SUN PHY, LECIM PHY, TVWS PHY, SIFS otherwise
 pub const MAC_AIFS: SymbolsOQpsk250Duration = MAC_SIFS;
