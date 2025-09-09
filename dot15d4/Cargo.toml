@@ -24,6 +24,8 @@ arbitrary = { version = "1.3.2", features = ["derive"], optional = true }
 
 rtos-trace = { version = "0.2", optional = true }
 embassy-sync = "0.7.2"
+bitmaps = { version = "3.2", default-features = false }
+
 
 [dev-dependencies]
 typenum = "1"
@@ -32,7 +34,7 @@ typenum = "1"
 default = ["security", "ies", "dot15d4-frame/strict"]
 
 ## Enable std-only features
-std = ["log"]
+std = ["bitmaps/std", "log"]
 
 ## Use tracing for logging
 log = ["dep:log", "dot15d4-util/log"]

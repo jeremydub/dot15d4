@@ -1,51 +1,32 @@
-mod csma;
-mod mcps;
-mod mlme;
-mod neighbors;
-mod pib;
-pub mod primitives;
-mod task;
-mod transmission;
-mod tsch;
+pub mod mcps;
+pub mod neighbors;
 
-use dot15d4_driver::timer::{LocalClockDuration, LocalClockInstant, RadioTimerApi};
-pub use dot15d4_frame as frame;
-
-use embassy_sync::{blocking_mutex::raw::NoopRawMutex, signal::Signal};
-use heapless::{
-    sorted_linked_list::{LinkedIndexU8, Min},
-    Vec,
-};
+use dot15d4_driver::radio::DriverConfig;
+use dot15d4_util::sync::HasAddress;
+use paste::paste;
 use rand_core::RngCore;
 
-use core::cell::RefCell;
-
-use paste::paste;
-
+use crate::driver::DriverRequestSender;
+use crate::scheduler::SchedulerRequestSender;
+use crate::service::{
+    MpscServiceRunner, Service, ServiceConfig, ServiceTask, ServiceTaskEvent, ServiceTaskTransition,
+};
 use crate::{
-    driver::{
-        constants::PHY_MAX_PACKET_SIZE_127,
-        frame::FrameType,
-        radio::{DriverConfig, MAX_DRIVER_OVERHEAD},
-        DriverRequestSender, DrvSvcRequest, DRIVER_CHANNEL_CAPACITY,
-    },
-    mac::mcps::data::DataRequestResult,
-    util::{
-        allocator::{BufferAllocator, IntoBuffer},
-        sync::{
-            channel::{Channel, Receiver, Sender},
-            select, Either, MatchingResponse, PollingResponseToken, ResponseToken,
-        },
-    },
+    driver::{constants::PHY_MAX_PACKET_SIZE_127, radio::MAX_DRIVER_OVERHEAD},
+    pib::Pib,
+    scheduler::SchedulerService,
+};
+use crate::{service_config, service_tasks, MacContext};
+use core::cell::RefCell;
+use core::future;
+
+pub use dot15d4_frame as frame;
+use dot15d4_util::{
+    allocator::BufferAllocator,
+    sync::{Channel, Receiver, Sender},
 };
 
-use self::{
-    frame::mpdu::MpduFrame,
-    mcps::data::{DataIndication, DataIndicationTask, DataRequestTask},
-    pib::Pib,
-    primitives::{MacIndication, MacRequest},
-    task::*,
-};
+use mcps::data::DataRequestTask;
 
 // TODO: Make allocator and channel capacities and the number of upper layer
 //       tasks configurable.
@@ -68,30 +49,35 @@ const UL_MSG_BACKLOG: usize = 1;
 ///       control channels towards applications directly.
 const UL_NUM_CLIENTS: usize = 1;
 
-pub type MacRequestChannel = Channel<(), MacRequest, (), UL_MAX_TX_TOKENS, UL_MSG_BACKLOG, 1>;
-pub type MacRequestReceiver<'channel> =
-    Receiver<'channel, (), MacRequest, (), UL_MAX_TX_TOKENS, UL_MSG_BACKLOG, 1>;
-pub type MacRequestSender<'channel> =
-    Sender<'channel, (), MacRequest, (), UL_MAX_TX_TOKENS, UL_MSG_BACKLOG, 1>;
+pub type MacRequestChannel<'svc, RadioDriverImpl: DriverConfig> = Channel<
+    (),
+    MacServiceRequest<'svc, RadioDriverImpl>,
+    MacServiceResponse<'svc, RadioDriverImpl>,
+    UL_MAX_TX_TOKENS,
+    UL_MSG_BACKLOG,
+    1,
+>;
+pub type MacRequestReceiver<'svc, RadioDriverImpl: DriverConfig> = Receiver<
+    'svc,
+    (),
+    MacServiceRequest<'svc, RadioDriverImpl>,
+    MacServiceResponse<'svc, RadioDriverImpl>,
+    UL_MAX_TX_TOKENS,
+    UL_MSG_BACKLOG,
+    1,
+>;
+pub type MacRequestSender<'svc, RadioDriverImpl: DriverConfig> = Sender<
+    'svc,
+    (),
+    MacServiceRequest<'svc, RadioDriverImpl>,
+    MacServiceResponse<'svc, RadioDriverImpl>,
+    UL_MAX_TX_TOKENS,
+    UL_MSG_BACKLOG,
+    1,
+>;
 
-pub type MacIndicationChannel =
-    Channel<(), MacIndication, (), UL_MAX_RX_TOKENS, UL_MSG_BACKLOG, UL_NUM_CLIENTS>;
-pub type MacIndicationReceiver<'channel> =
-    Receiver<'channel, (), MacIndication, (), UL_MAX_RX_TOKENS, UL_MSG_BACKLOG, UL_NUM_CLIENTS>;
-pub type MacIndicationSender<'channel> =
-    Sender<'channel, (), MacIndication, (), UL_MAX_RX_TOKENS, UL_MSG_BACKLOG, UL_NUM_CLIENTS>;
-
-/// The number of MAC indication tasks that must be executing in parallel making
-/// use of the driver's pipelining capability.
-const MAC_NUM_PARALLEL_INDICATION_TASKS: usize = UL_MAX_RX_TOKENS + 1;
-const MAC_NUM_PARALLEL_REQUEST_TASKS: usize = UL_MAX_TX_TOKENS;
-const _: () = {
-    assert!(
-        DRIVER_CHANNEL_CAPACITY
-            == MAC_NUM_PARALLEL_INDICATION_TASKS + MAC_NUM_PARALLEL_REQUEST_TASKS,
-        "driver channel capacity does not match number of MAC tasks"
-    )
-};
+/// TODO: handle data indication
+const MAC_NUM_INDICATION_TASKS: usize = 1;
 
 // TODO: Challenge the following capacity calculation.
 /// Buffers are allocated by:
@@ -104,698 +90,69 @@ const _: () = {
 /// - one buffer per indication task
 /// - one pre-allocated buffer for outgoing ACKs
 /// - one pre-allocated buffer for incoming ACKs
-pub const MAC_NUM_REQUIRED_BUFFERS: usize =
-    UL_MAX_TX_TOKENS + MAC_NUM_PARALLEL_INDICATION_TASKS + 2;
+pub const MAC_NUM_REQUIRED_BUFFERS: usize = UL_MAX_TX_TOKENS + MAC_NUM_INDICATION_TASKS + 2;
 pub const MAC_BUFFER_SIZE: usize = PHY_MAX_PACKET_SIZE_127 + MAX_DRIVER_OVERHEAD;
 
 pub type MacBufferAllocator = BufferAllocator;
 
-// Local macro: No need for strict macro hygiene.
-macro_rules! mac_svc_tasks {
-    ($($mac_task:ident),+)=> {
-        paste!{
-            enum MacSvcTask<'task, RadioDriverImpl: DriverConfig> {
-                $($mac_task([<$mac_task Task>]<'task, RadioDriverImpl>)),*
-            }
-
-            enum MacSvcTaskResult<'task, RadioDriverImpl: DriverConfig> {
-                $($mac_task(<[<$mac_task Task>]<'task, RadioDriverImpl> as MacTask>::Result)),*
-            }
-
-            $(mac_svc_tasks!(transition_converter: $mac_task);)*
-
-            impl<'task, RadioDriverImpl: DriverConfig> MacTask for MacSvcTask<'task, RadioDriverImpl> {
-                type Result = MacSvcTaskResult<'task, RadioDriverImpl>;
-
-                fn step(self, event: MacTaskEvent) -> MacTaskTransition<Self> {
-                    match self {
-                        $(MacSvcTask::$mac_task(inner_task) => inner_task.step(event).into()),*
-                    }
-                }
-            }
-
-        }
-    };
-
-    (transition_converter: $mac_task:ident) => {
-        paste!{
-            impl<'task, RadioDriverImpl: DriverConfig> From<MacTaskTransition<[<$mac_task Task>]<'task, RadioDriverImpl>>> for MacTaskTransition<MacSvcTask<'task, RadioDriverImpl>> {
-                fn from(value: MacTaskTransition<[<$mac_task Task>]<'task, RadioDriverImpl>>) -> Self {
-                    match value {
-                        MacTaskTransition::DrvSvcRequest(updated_task, driver_request, task_result) => {
-                            let updated_task = MacSvcTask::$mac_task(updated_task);
-                            let task_result = task_result.map(|task_result| MacSvcTaskResult::$mac_task(task_result)) ;
-                            MacTaskTransition::DrvSvcRequest(updated_task, driver_request, task_result)
-                        },
-                        MacTaskTransition::Terminated(task_result) => {
-                            let task_result = MacSvcTaskResult::$mac_task(task_result);
-                            MacTaskTransition::Terminated(task_result.into())
-                        },
-                    }
-                }
-            }
-        }
-    }
+pub enum MacServiceState {
+    WaitingForRequest,
 }
 
-mac_svc_tasks!(DataRequest, DataIndication);
-
-const NUM_MAC_SVC_TASKS: usize = MAC_NUM_PARALLEL_REQUEST_TASKS + MAC_NUM_PARALLEL_INDICATION_TASKS;
-
-pub(crate) struct MacSvcContext<'svc, RadioDriverImpl: DriverConfig> {
-    pib: Pib,
-    rng: &'svc mut dyn RngCore,
-    timer: RadioDriverImpl::Timer,
-}
-
-struct MacServiceState<'state, RadioDriverImpl: DriverConfig> {
-    // MAC request tasks are indexed by the message slots of the corresponding
-    // MAC requests (0..UL_NUM_PARALLEL_REQUESTS).
-    //
-    // MAC indication tasks use the higher indices
-    // (UL_NUM_PARALLEL_REQUESTS..UL_NUM_PARALLEL_REQUESTS +
-    // MAC_NUM_PARALLEL_INDICATIONS).
-    //
-    // We need an additional indication background task so that we can
-    // efficiently use the driver service's pipelining capability.
-    mac_svc_tasks: [Option<MacSvcTask<'state, RadioDriverImpl>>; NUM_MAC_SVC_TASKS],
-
-    // Outstanding driver requests will be pushed to this vector and polled for
-    // responses.
-    outstanding_driver_requests: heapless::Vec<PollingResponseToken, DRIVER_CHANNEL_CAPACITY>,
-
-    // A driver-to-MAC message index: The index corresponds to the driver
-    // message slot, the content to the corresponding MAC request slot.
-    driver_msg_slot_to_task_index: [usize; DRIVER_CHANNEL_CAPACITY],
-
-    // Response tokens for outstanding MAC requests.
-    outstanding_mac_requests: [Option<ResponseToken>; MAC_NUM_PARALLEL_REQUEST_TASKS],
-
-    // Signal for passing a new driver request (with corresponding MAC task index)
-    driver_request_signal: Signal<NoopRawMutex, (DrvSvcRequest, usize)>,
-}
-
-impl<RadioDriverImpl: DriverConfig> MacServiceState<'_, RadioDriverImpl> {
-    fn new() -> Self {
-        Self {
-            mac_svc_tasks: [const { None }; NUM_MAC_SVC_TASKS],
-            outstanding_driver_requests: heapless::Vec::new(),
-            driver_msg_slot_to_task_index: [0; DRIVER_CHANNEL_CAPACITY],
-            outstanding_mac_requests: [const { None }; MAC_NUM_PARALLEL_REQUEST_TASKS],
-            driver_request_signal: Signal::new(),
-        }
-    }
-}
-
-/// A structure exposing MAC sublayer services such as MLME and MCPS. This runs
-/// the main event loop that handles interactions between an upper layer and the
-/// PHY sublayer. It uses channels to communicate with upper layer tasks and
-/// with radio drivers.
 pub struct MacService<'svc, RadioDriverImpl: DriverConfig> {
-    /// Timer instance to wait until driver requests become pending.
-    // TODO: remove allow attribute once used in code
-    #[allow(dead_code)]
-    timer: RadioDriverImpl::Timer,
+    // runner: MpscServiceRunner<'svc, Self>,
     /// Message buffer allocator
     buffer_allocator: MacBufferAllocator,
     /// Upper layer channel from which MAC requests are received.
-    request_receiver: MacRequestReceiver<'svc>,
-    /// Upper layer channel to which MAC indications are sent.
-    indication_sender: MacIndicationSender<'svc>,
-    /// Channel to communicate with one or several radio drivers.
-    driver_request_sender: DriverRequestSender<'svc>,
+    request_receiver: MacRequestReceiver<'svc, RadioDriverImpl>,
+    /// Channel to communicate with scheduler service.
+    scheduler_request_sender: DriverRequestSender<'svc>,
     /// Context shared among tasks, containing PIB.
-    context: RefCell<MacSvcContext<'svc, RadioDriverImpl>>,
+    context: RefCell<MacContext<'svc, RadioDriverImpl>>,
 }
 
-impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
+impl<'svc, RadioDriverImpl: DriverConfig + 'svc> Service<'svc>
+    for MacService<'svc, RadioDriverImpl>
+{
+    type State = MacServiceState;
+    fn next_request() {
+        todo!()
+    }
+
+    fn handle_task_result() {
+        todo!()
+    }
+}
+
+impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl>
+where
+    Self: Service<'svc>,
+{
     /// Creates a new [`MacService<U, Timer, R>`].
     pub fn new(
-        timer: RadioDriverImpl::Timer,
-        rng: &'svc mut dyn RngCore,
+        context: &'svc RefCell<MacContext<'svc, RadioDriverImpl>>,
         buffer_allocator: MacBufferAllocator,
-        request_receiver: MacRequestReceiver<'svc>,
-        indication_sender: MacIndicationSender<'svc>,
-        driver_request_sender: DriverRequestSender<'svc>,
+        request_receiver: MacRequestReceiver<'svc, RadioDriverImpl>,
+        // indication_sender: MacIndicationSender<'svc>,
+        scheduler_request_sender: SchedulerRequestSender<'svc, RadioDriverImpl>,
     ) -> Self {
         Self {
-            timer,
+            context,
             buffer_allocator,
             request_receiver,
-            indication_sender,
-            driver_request_sender,
-            context: RefCell::new(MacSvcContext {
-                pib: Pib::default(),
-                rng,
-                timer,
-            }),
+            scheduler_request_sender,
         }
     }
-
-    /// Run the main event loop used by the MAC sublayer for its operation.
-    ///
-    /// The loop waits until receiving a MCPS-DATA request from the upper layer.
-    /// It will then instantiate the corresponding state machine and start
-    /// driving it. The state machine will produce driver service requests which
-    /// will be passed on to the driver service. Whenever the driver service
-    /// returns a response it will be used to drive the corresponding state
-    /// machine.
-    pub async fn run(&'svc mut self) -> ! {
-        let mut state = MacServiceState::new();
-
-        self.create_indication_tasks(&mut state);
-
-        let mut consumer_token = self
-            .request_receiver
-            .try_allocate_consumer_token()
-            .expect("no capacity");
-
-        loop {
-            match select(
-                self.request_receiver
-                    .wait_for_request(&mut consumer_token, &()),
-                self.driver_request_sender
-                    .wait_for_response(&mut state.outstanding_driver_requests),
-            )
-            .await
-            {
-                // Upper layer: A MAC request was received. Create the corresponding task and kick it off.
-                Either::First((mac_request_response_token, mac_request)) => {
-                    let mac_request_task_index = mac_request_response_token.message_slot() as usize;
-                    state.outstanding_mac_requests[mac_request_task_index] =
-                        Some(mac_request_response_token);
-                    let mac_request_task = self.create_request_task(mac_request);
-                    self.step_task(
-                        &mut state,
-                        mac_request_task_index,
-                        mac_request_task,
-                        MacTaskEvent::Entry,
-                    );
-                }
-                // Driver response
-                Either::Second(MatchingResponse {
-                    response: driver_response,
-                    msg_slot: driver_msg_slot,
-                }) => {
-                    let mac_svc_task_index =
-                        state.driver_msg_slot_to_task_index[driver_msg_slot as usize];
-                    let mac_task_event = MacTaskEvent::DrvSvcResponse(driver_response);
-                    let mac_svc_task = state.mac_svc_tasks[mac_svc_task_index].take().unwrap();
-
-                    self.step_task(&mut state, mac_svc_task_index, mac_svc_task, mac_task_event);
-                }
-            };
-        }
-    }
-
-    async fn run_requests_scheduler<'tasks>(
-        self,
-        state: &mut MacServiceState<'tasks, RadioDriverImpl>,
-    ) {
-        // Initial expiration instant is MAX value since no driver request to schedule
-        let mut next_expiration_instant = LocalClockInstant::from_ticks(u64::MAX);
-
-        // TODO: use DRIVER_CHANNEL_CAPACITY ?
-        // Priority queue for driver requests
-        const QUEUE_CAPACITY: usize = 4;
-        let mut driver_requests = heapless::sorted_linked_list::SortedLinkedList::<
-            (DrvSvcRequest, usize),
-            LinkedIndexU8,
-            Min,
-            QUEUE_CAPACITY,
-        >::new_u8();
-
-        let mut best_effort_queue = Vec::new();
-
-        loop {
-            // TODO: signal from driver service
-
-            match select(state.driver_request_signal.wait(), unsafe {
-                self.timer.wait_until(next_expiration_instant, None)
-            })
-            .await
-            {
-                Either::First((driver_request, mac_svc_task_index)) => {
-                    // Add to priority queue
-                    // TODO: handle queue full
-                    driver_requests
-                        .push((driver_request, mac_svc_task_index))
-                        .unwrap();
-
-                    // let best_effort = ...
-                    // let best_effort_request.max_execution_time()
-
-                    // calculate new expiration instant
-                    if let Some((closest_request, _)) = driver_requests.peek() {
-                        if let Some(instant) = closest_request.rmarker() {
-                            next_expiration_instant = instant
-                                .checked_sub_duration(RadioDriverImpl::Timer::GUARD_TIME)
-                                .unwrap();
-                            // check if time between now and next is enough
-                            if next_expiration_instant
-                                < self.timer.now() + RadioDriverImpl::Timer::GUARD_TIME
-                            {
-                                // TODO: DrvSvcResponse::Scheduling::Overdue
-                            }
-                        } else {
-                            // TODO: schedule best-effort right away
-                        }
-                    } else {
-                        // A driver request has just been pushed.
-                        unreachable!()
-                    }
-                }
-                Either::Second(timer_result) => {
-                    // Security: if timeout is triggered, driver_requests has at least one request
-                    let (driver_request, mac_svc_task_index) = driver_requests.pop().unwrap();
-                    // Safety: We reserved sufficient channel capacity.
-                    let driver_msg_token = self
-                        .driver_request_sender
-                        .try_allocate_request_token()
-                        .unwrap();
-                    let driver_response_token = self
-                        .driver_request_sender
-                        .send_request_polling_response(driver_msg_token, driver_request);
-                    state.driver_msg_slot_to_task_index
-                        [driver_response_token.message_slot() as usize] = mac_svc_task_index;
-                    state
-                        .outstanding_driver_requests
-                        .push(driver_response_token)
-                        .unwrap();
-                }
-            }
-        }
-    }
-
-    fn step_task<'tasks>(
-        &self,
-        state: &mut MacServiceState<'tasks, RadioDriverImpl>,
-        mac_svc_task_index: usize,
-        mac_svc_task: MacSvcTask<'tasks, RadioDriverImpl>,
-        event: MacTaskEvent,
-    ) {
-        let is_mac_request = mac_svc_task_index < MAC_NUM_PARALLEL_REQUEST_TASKS;
-
-        let task_result = match mac_svc_task.step(event) {
-            MacTaskTransition::DrvSvcRequest(updated_task, driver_request, intermediate_result) => {
-                // TODO: is Signal safe here ? Should we use our channel instead ?
-                state
-                    .driver_request_signal
-                    .signal((driver_request, mac_svc_task_index));
-                state.mac_svc_tasks[mac_svc_task_index] = Some(updated_task);
-                intermediate_result.map(MacTaskResultType::Intermediate)
-            }
-            MacTaskTransition::Terminated(task_result) => {
-                #[cfg(feature = "rtos-trace")]
-                rtos_trace::trace::task_exec_end();
-
-                // Only MAC requests may terminate.
-                debug_assert!(is_mac_request);
-
-                Some(MacTaskResultType::Final(task_result))
-            }
-        };
-
-        if let Some(task_result) = task_result {
-            if is_mac_request {
-                if let MacTaskResultType::Final(task_result) = task_result {
-                    self.handle_request_task_result(
-                        task_result,
-                        state.outstanding_mac_requests[mac_svc_task_index]
-                            .take()
-                            .unwrap(),
-                    )
-                }
-            } else if let MacTaskResultType::Intermediate(task_result) = task_result {
-                self.handle_indication_task_result(task_result)
-            } else {
-                unreachable!();
-            }
-        }
-    }
-
-    fn create_indication_tasks<'tasks>(&self, state: &mut MacServiceState<'tasks, RadioDriverImpl>)
-    where
-        'svc: 'tasks,
-    {
-        const FIRST_MAC_INDICATION_TASK_INDEX: usize =
-            NUM_MAC_SVC_TASKS - MAC_NUM_PARALLEL_INDICATION_TASKS;
-
-        for mac_indication_task_index in FIRST_MAC_INDICATION_TASK_INDEX..NUM_MAC_SVC_TASKS {
-            let mac_indication_task =
-                MacSvcTask::DataIndication(DataIndicationTask::<'tasks, RadioDriverImpl>::new(
-                    self.buffer_allocator,
-                ));
-            self.step_task(
-                state,
-                mac_indication_task_index,
-                mac_indication_task,
-                MacTaskEvent::Entry,
-            );
-        }
-    }
-
-    fn create_request_task(
-        &'svc self,
-        mac_request: MacRequest,
-    ) -> MacSvcTask<'svc, RadioDriverImpl> {
-        match mac_request {
-            MacRequest::McpsDataRequest(data_request) => {
-                MacSvcTask::DataRequest(DataRequestTask::new(data_request, &self.context))
-            }
-            MacRequest::MlmeBeaconRequest(_) => todo!(),
-            MacRequest::MlmeSetRequest(_) => todo!(),
-        }
-    }
-
-    fn handle_request_task_result(
-        &self,
-        result: MacSvcTaskResult<RadioDriverImpl>,
-        response_token: ResponseToken,
-    ) {
-        match result {
-            MacSvcTaskResult::DataRequest(task_result) => {
-                let recovered_radio_frame = match task_result {
-                    DataRequestResult::Sent(recovered_radio_frame) => recovered_radio_frame,
-                    DataRequestResult::ChannelAccessFailure(unsent_radio_frame)
-                    | DataRequestResult::NoAck(unsent_radio_frame) => {
-                        unsent_radio_frame.forget_size::<RadioDriverImpl>()
-                    }
-                };
-
-                // Safety: Clients must allocate buffers from the MAC's
-                //         allocator.
-                unsafe {
-                    self.buffer_allocator
-                        .deallocate_buffer(recovered_radio_frame.into_buffer());
-                }
-
-                // Safety: We signal reception _after_ de-allocating the buffer
-                //         so that clients can use the reception signal to
-                //         safely manage bounded buffer resources. We may even
-                //         return the buffer at some time so that it doesn't
-                //         have to be re-allocated. We just don't do that
-                //         currently as the smoltcp driver is synchronous and
-                //         cannot handle any response.
-                self.request_receiver.received(response_token, ());
-            }
-            // The rest are indications
-            _ => unreachable!(),
-        }
-    }
-
-    fn handle_indication_task_result(&self, result: MacSvcTaskResult<RadioDriverImpl>) {
-        match result {
-            MacSvcTaskResult::DataIndication(DataIndication { mpdu, .. }) => {
-                self.handle_incoming_mpdu(mpdu);
-            }
-            // The rest are requests
-            _ => unreachable!(),
-        }
-    }
-
-    fn handle_incoming_mpdu(&self, mpdu: MpduFrame) {
-        // TODO: Implement proper handling of incoming frames.
-        match mpdu.frame_control().frame_type() {
-            FrameType::Data => {
-                if let Some(request_token) = self.indication_sender.try_allocate_request_token() {
-                    let indication = MacIndication::McpsData(DataIndication {
-                        mpdu,
-                        timestamp: None,
-                    });
-
-                    // TODO: Poll response, once we work with MAC response
-                    //       primitives.
-                    self.indication_sender
-                        .send_request_no_response(request_token, indication);
-                } else {
-                    // To avoid DoS we drop incoming packets if the upper layer
-                    // is not able to ingest them fast enough.
-
-                    // Safety: Incoming frames are allocated by the
-                    //         MAC service itself.
-                    unsafe {
-                        self.buffer_allocator.deallocate_buffer(mpdu.into_buffer());
-                    }
-                }
-
-                #[cfg(feature = "rtos-trace")]
-                rtos_trace::trace::task_exec_end();
-            }
-            _ => {
-                // Safety: Incoming frames are allocated by the
-                //         MAC service itself.
-                unsafe {
-                    self.buffer_allocator.deallocate_buffer(mpdu.into_buffer());
-                }
-            }
-        }
+    pub async fn run(&'svc mut self) {
+        future::pending().await
     }
 }
 
-#[cfg(test)]
-mod tests {
-
-    use dot15d4_driver::constants::PHY_MAX_PACKET_SIZE_127;
-    use dot15d4_driver::frame::AddressingMode::Short;
-    use dot15d4_driver::frame::{
-        Address, AddressingRepr, FrameType, FrameVersion, PanIdCompressionRepr, ShortAddress,
-    };
-    use dot15d4_driver::frame::{RadioFrame, RadioFrameSized};
-    use dot15d4_driver::radio::{DriverConfig, FcsTwoBytes};
-    use dot15d4_driver::tasks::{TaskRx, TaskTx, TxError, TxResult};
-    use dot15d4_driver::timer::{LocalClockDuration, LocalClockInstant, RadioTimerApi};
-    use dot15d4_frame::repr::{MpduRepr, SeqNrRepr};
-    use dot15d4_util::allocator::BufferToken;
-    use rand_core::{impls, RngCore};
-    use typenum::{U, U1, U2};
-
-    use crate::driver::{DrvSvcResponse, DrvSvcTaskError, DrvSvcTaskResult};
-
-    use super::task::{MacTask, MacTaskEvent, MacTaskTransition};
-
-    #[derive(Copy, Clone)]
-    pub(crate) struct FakeRadioTimer {
-        current_time: LocalClockInstant,
-    }
-
-    impl FakeRadioTimer {
-        pub fn new() -> Self {
-            Self {
-                current_time: LocalClockInstant::from_ticks(0),
-            }
-        }
-        pub fn update(&mut self, instant: LocalClockInstant) {
-            self.current_time = instant;
-        }
-    }
-
-    impl RadioTimerApi for FakeRadioTimer {
-        fn now(&self) -> LocalClockInstant {
-            self.current_time
-        }
-
-        unsafe fn wait_until(
-            &self,
-            _instant: LocalClockInstant,
-            _signal: Option<dot15d4_driver::timer::HardwareSignal>,
-        ) -> impl core::prelude::rust_2024::Future<Output = dot15d4_driver::timer::RadioTimerResult>
-        {
-            core::future::ready(dot15d4_driver::timer::RadioTimerResult::Ok)
-        }
-
-        unsafe fn schedule_event(
-            &self,
-            _timed_signal: dot15d4_driver::timer::TimedSignal,
-        ) -> dot15d4_driver::timer::RadioTimerResult {
-            todo!()
-        }
-    }
-
-    pub(crate) struct FakeDriverConfig;
-    impl DriverConfig for FakeDriverConfig {
-        const GUARD_TIME: dot15d4_driver::timer::LocalClockDuration =
-            LocalClockDuration::micros(500);
-        type Headroom = U1;
-        type Tailroom = U2;
-        type MaxSduLength = U<PHY_MAX_PACKET_SIZE_127>;
-        type Fcs = FcsTwoBytes;
-        type Timer = FakeRadioTimer;
-    }
-
-    pub(crate) struct FakeRng<'a> {
-        numbers: &'a [u64],
-        next_index: usize,
-    }
-
-    impl<'a> FakeRng<'a> {
-        pub(crate) fn new(numbers: &'a [u64]) -> Self {
-            FakeRng {
-                numbers,
-                next_index: 0,
-            }
-        }
-    }
-
-    impl RngCore for FakeRng<'_> {
-        fn next_u32(&mut self) -> u32 {
-            self.next_u64() as u32
-        }
-
-        fn next_u64(&mut self) -> u64 {
-            let value = self.numbers[self.next_index];
-            self.next_index = (self.next_index + 1) % self.numbers.len();
-            value
-        }
-
-        fn fill_bytes(&mut self, dst: &mut [u8]) {
-            impls::fill_bytes_via_next(self, dst)
-        }
-
-        fn try_fill_bytes(&mut self, _dest: &mut [u8]) -> Result<(), rand_core::Error> {
-            Ok(())
-        }
-    }
-
-    pub(crate) fn generate_data_frame(buffer: &'static mut [u8]) -> RadioFrame<RadioFrameSized> {
-        #[allow(static_mut_refs)]
-        let buffer = BufferToken::new(buffer);
-
-        const PAYLOAD: [u8; 32] = [0u8; 32];
-
-        // Building representation of the data frame
-        let mut mpdu_parser = MpduRepr::new()
-            .with_frame_control(SeqNrRepr::Yes)
-            .with_addressing(AddressingRepr::new(
-                Short,
-                Short,
-                true,
-                PanIdCompressionRepr::Legacy,
-            ))
-            .without_security()
-            .without_ies()
-            .into_parsed_mpdu::<FakeDriverConfig>(
-                FrameVersion::Ieee802154,
-                FrameType::Data,
-                PAYLOAD.len() as u16,
-                buffer,
-            )
-            .unwrap();
-
-        mpdu_parser.set_ack_request(true);
-        mpdu_parser.set_sequence_number(42);
-        let mut addressing_fiels = mpdu_parser.addressing_fields_mut();
-        addressing_fiels
-            .src_address_mut()
-            .set(&Address::Short(ShortAddress::<&[u8]>::from_u16(1)));
-        addressing_fiels
-            .dst_address_mut()
-            .set(&Address::Short(ShortAddress::<&[u8]>::from_u16(2)));
-
-        mpdu_parser.into_radio_frame::<FakeDriverConfig>()
-    }
-
-    pub(crate) enum TaskTestEvent {
-        TaskEntry,
-        DrvRespTxSent,
-        DrvRespTxCcaBusy,
-        DrvRespTxNoAck,
-        DrvRespTxSchedulingError,
-        DrvRespRxSchedulingError,
-    }
-
-    pub(crate) enum TaskTestTransition<'a, Task: MacTask> {
-        TaskTerminated(&'a dyn Fn(Task::Result)),
-        DrvReqTx(&'a dyn Fn(TaskTx, Option<Task::Result>) -> TaskTx),
-        DrvReqRx(&'a dyn Fn(TaskRx, Option<Task::Result>) -> TaskRx),
-    }
-
-    pub(crate) struct TaskTester<Task: MacTask> {
-        task: Option<Task>,
-        last_tx_request: Option<TaskTx>,
-        last_rx_request: Option<TaskRx>,
-    }
-    impl<Task: MacTask> TaskTester<Task> {
-        pub(crate) fn new(task: Task) -> Self {
-            Self {
-                task: Some(task),
-                last_tx_request: None,
-                last_rx_request: None,
-            }
-        }
-
-        pub fn assert_transition<'a>(
-            &mut self,
-            event: TaskTestEvent,
-            expected_transition: TaskTestTransition<'a, Task>,
-        ) {
-            let transition = match event {
-                TaskTestEvent::TaskEntry => {
-                    Some(self.task.take().unwrap().step(MacTaskEvent::Entry))
-                }
-                TaskTestEvent::DrvRespTxSent => {
-                    Some(self.task.take().unwrap().step(MacTaskEvent::DrvSvcResponse(
-                        crate::driver::DrvSvcResponse::Tx(DrvSvcTaskResult::Ok(TxResult::Sent(
-                            self.last_tx_request.take().unwrap().radio_frame,
-                        ))),
-                    )))
-                }
-                TaskTestEvent::DrvRespTxCcaBusy => {
-                    Some(self.task.take().unwrap().step(MacTaskEvent::DrvSvcResponse(
-                        DrvSvcResponse::Tx(DrvSvcTaskResult::Err(DrvSvcTaskError::Task(
-                            TxError::CcaBusy(self.last_tx_request.take().unwrap().radio_frame),
-                        ))),
-                    )))
-                }
-                TaskTestEvent::DrvRespTxNoAck => Some(self.task.take().unwrap().step(
-                    MacTaskEvent::DrvSvcResponse(DrvSvcResponse::Tx(DrvSvcTaskResult::Ok(
-                        TxResult::Nack(self.last_tx_request.take().unwrap().radio_frame),
-                    ))),
-                )),
-                TaskTestEvent::DrvRespTxSchedulingError => Some(self.task.take().unwrap().step(
-                    MacTaskEvent::DrvSvcResponse(DrvSvcResponse::Tx(DrvSvcTaskResult::Err(
-                        DrvSvcTaskError::SchedulingError(self.last_tx_request.take().unwrap()),
-                    ))),
-                )),
-                TaskTestEvent::DrvRespRxSchedulingError => Some(self.task.take().unwrap().step(
-                    MacTaskEvent::DrvSvcResponse(DrvSvcResponse::Rx(DrvSvcTaskResult::Err(
-                        DrvSvcTaskError::SchedulingError(self.last_rx_request.take().unwrap()),
-                    ))),
-                )),
-            };
-
-            match expected_transition {
-                TaskTestTransition::TaskTerminated(test_fn) => match transition.unwrap() {
-                    MacTaskTransition::Terminated(result) => test_fn(result),
-                    _ => unreachable!("Expected MAC Transmission termination"),
-                },
-                TaskTestTransition::DrvReqTx(test_fn) => match transition.unwrap() {
-                    MacTaskTransition::DrvSvcRequest(task, drv_svc_request, result) => {
-                        match drv_svc_request {
-                            crate::driver::DrvSvcRequest::Tx(mut task_tx) => {
-                                task_tx = test_fn(task_tx, result);
-                                self.task = Some(task);
-                                self.last_tx_request = Some(task_tx);
-                            }
-                            _ => unreachable!("Expected Driver TX request"),
-                        }
-                    }
-                    _ => unreachable!("Expected Driver request"),
-                },
-                TaskTestTransition::DrvReqRx(test_fn) => match transition.unwrap() {
-                    MacTaskTransition::DrvSvcRequest(task, drv_svc_request, result) => {
-                        match drv_svc_request {
-                            crate::driver::DrvSvcRequest::Rx(mut task_rx) => {
-                                task_rx = test_fn(task_rx, result);
-                                self.task = Some(task);
-                                self.last_rx_request = Some(task_rx);
-                            }
-                            _ => unreachable!("Expected Driver TX request"),
-                        }
-                    }
-                    _ => unreachable!("Expected Driver request"),
-                },
-            }
-        }
+impl<RadioDriverImpl: DriverConfig> HasAddress<()> for MacServiceRequest<'_, RadioDriverImpl> {
+    fn matches(&self, _: &()) -> bool {
+        true
     }
 }
+
+service_config!(MacService, SchedulerService);
+service_tasks!(MacService, DataRequest);

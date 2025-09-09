@@ -1,21 +1,23 @@
 #![allow(dead_code)]
-use core::{cell::RefCell, marker::PhantomData};
+use core::cell::RefCell;
 
 use dot15d4_driver::radio::DriverConfig;
 
 use crate::{
     driver::frame::{RadioFrame, RadioFrameSized, RadioFrameUnsized},
-    mac::{frame::mpdu::MpduFrame, task::*},
+    mac::frame::mpdu::MpduFrame,
+    scheduler::csma::TransmitWithCsmaCaError,
+    service::{ServiceTask, ServiceTaskEvent, ServiceTaskTransition},
+    MacContext,
 };
 
 use super::{
     csma::{TransmitWithCsmaCaResult, TransmitWithCsmaCaTask},
-    MacSvcContext,
+    SchedulerService,
 };
 
 pub(crate) struct TransmissionTask<'task, RadioDriverImpl: DriverConfig> {
     state: TransmissionState<'task, RadioDriverImpl>,
-    radio: PhantomData<RadioDriverImpl>,
 }
 
 pub(crate) enum TransmissionState<'task, RadioDriverImpl: DriverConfig> {
@@ -23,30 +25,16 @@ pub(crate) enum TransmissionState<'task, RadioDriverImpl: DriverConfig> {
         /// MPDU to be sent.
         MpduFrame,
         /// MAC Service context
-        &'task RefCell<MacSvcContext<'task, RadioDriverImpl>>,
-        /// Placeholder for future references.
-        PhantomData<&'task RadioDriverImpl>,
+        &'task RefCell<MacContext<'task, RadioDriverImpl>>,
     ),
     SendingFrameWithCsmaCa(
         u8,
         TransmitWithCsmaCaTask<'task, RadioDriverImpl>,
-        &'task RefCell<MacSvcContext<'task, RadioDriverImpl>>,
+        &'task RefCell<MacContext<'task, RadioDriverImpl>>,
     ),
 }
 
-impl<'task, RadioDriverImpl: DriverConfig> TransmissionTask<'task, RadioDriverImpl> {
-    pub fn new(
-        mpdu: MpduFrame,
-        context: &'task RefCell<MacSvcContext<'task, RadioDriverImpl>>,
-    ) -> Self {
-        Self {
-            state: TransmissionState::Initial(mpdu, context, PhantomData),
-            radio: PhantomData,
-        }
-    }
-}
-
-/// Final result of a data request task.
+/// Possible results of a transmission task.
 #[derive(Debug, PartialEq)]
 pub(crate) enum TransmissionResult {
     /// The Tx frame was sent.
@@ -70,34 +58,56 @@ pub(crate) enum TransmissionResult {
         /// recovered Tx radio frame
         RadioFrame<RadioFrameSized>,
     ),
+}
+
+/// Error that may occur during a transmission task.
+#[derive(Debug, PartialEq)]
+pub(crate) enum TransmissionError {
     /// Failed after maximum number of attempts.
-    ///
-    /// This is always a final result.
     ChannelAccessFailure(RadioFrame<RadioFrameSized>),
 }
 
-impl<'task, RadioDriverImpl: DriverConfig> MacTask for TransmissionTask<'task, RadioDriverImpl> {
-    type Result = TransmissionResult;
+impl<'svc, RadioDriverImpl> TransmissionTask<'svc, RadioDriverImpl>
+where
+    RadioDriverImpl: DriverConfig,
+    Self: ServiceTask<'svc, SchedulerService<'svc, RadioDriverImpl>>,
+{
+    pub fn new(mpdu: MpduFrame, context: &'svc RefCell<MacContext<'svc, RadioDriverImpl>>) -> Self {
+        Self {
+            state: TransmissionState::Initial(mpdu, context),
+        }
+    }
+}
 
-    fn step(mut self, event: MacTaskEvent) -> MacTaskTransition<Self> {
+impl<'svc, RadioDriverImpl: DriverConfig> ServiceTask<'svc, SchedulerService<'svc, RadioDriverImpl>>
+    for TransmissionTask<'svc, RadioDriverImpl>
+{
+    type Request = MpduFrame;
+    type Result = TransmissionResult;
+    type Error = TransmissionError;
+
+    fn step(
+        mut self,
+        event: ServiceTaskEvent<'svc, SchedulerService<'svc, RadioDriverImpl>>,
+    ) -> ServiceTaskTransition<'svc, SchedulerService<'svc, RadioDriverImpl>, Self> {
         match self.state {
-            TransmissionState::Initial(mpdu, context, _) => {
-                debug_assert!(matches!(event, MacTaskEvent::Entry));
+            TransmissionState::Initial(mpdu, context) => {
+                debug_assert!(matches!(event, ServiceTaskEvent::Entry));
                 let radio_frame = mpdu.into_radio_frame::<RadioDriverImpl>();
                 match TransmitWithCsmaCaTask::<RadioDriverImpl>::new(radio_frame, context)
-                    .step(MacTaskEvent::Entry)
+                    .step(ServiceTaskEvent::Entry)
                 {
-                    MacTaskTransition::DrvSvcRequest(csma_ca_task, drv_svc_request, _) => {
+                    ServiceTaskTransition::Intermediate(csma_ca_task, drv_svc_request, _) => {
                         self.state =
                             TransmissionState::SendingFrameWithCsmaCa(1, csma_ca_task, context);
-                        MacTaskTransition::DrvSvcRequest(self, drv_svc_request, None)
+                        ServiceTaskTransition::Intermediate(self, drv_svc_request, None)
                     }
-                    MacTaskTransition::Terminated(_) => unreachable!(),
+                    ServiceTaskTransition::Terminated(_) => unreachable!(),
                 }
             }
             TransmissionState::SendingFrameWithCsmaCa(attempt, csma_ca_task, context) => {
                 match csma_ca_task.step(event) {
-                    MacTaskTransition::DrvSvcRequest(
+                    ServiceTaskTransition::Intermediate(
                         csma_ca_task,
                         drv_svc_request,
                         Some(TransmitWithCsmaCaResult::CsmaCaBackoff(_nb)),
@@ -107,55 +117,63 @@ impl<'task, RadioDriverImpl: DriverConfig> MacTask for TransmissionTask<'task, R
                             csma_ca_task,
                             context,
                         );
-                        MacTaskTransition::DrvSvcRequest(self, drv_svc_request, None)
+                        ServiceTaskTransition::Intermediate(self, drv_svc_request, None)
                     }
-                    MacTaskTransition::Terminated(csma_ca_result) => match csma_ca_result {
-                        TransmitWithCsmaCaResult::Sent(radio_frame, _nb) => {
-                            // TODO: propagate NB
-                            MacTaskTransition::Terminated(TransmissionResult::Sent(
-                                radio_frame.forget_size::<RadioDriverImpl>(),
-                            ))
-                        }
-                        TransmitWithCsmaCaResult::ChannelAccessFailure(radio_frame) => {
-                            MacTaskTransition::Terminated(TransmissionResult::ChannelAccessFailure(
-                                radio_frame,
-                            ))
-                        }
-                        TransmitWithCsmaCaResult::NoAck(radio_frame) => {
-                            if attempt <= context.borrow().pib.max_frame_retries {
-                                // TODO: support non-CsmaCa based transmisson
-                                match TransmitWithCsmaCaTask::<RadioDriverImpl>::new(
-                                    radio_frame,
-                                    context,
-                                )
-                                .step(MacTaskEvent::Entry)
-                                {
-                                    MacTaskTransition::DrvSvcRequest(
-                                        csma_ca_task,
-                                        drv_svc_request,
-                                        _,
-                                    ) => {
-                                        self.state = TransmissionState::SendingFrameWithCsmaCa(
-                                            attempt + 1,
-                                            csma_ca_task,
-                                            context,
-                                        );
-                                        MacTaskTransition::DrvSvcRequest(
-                                            self,
-                                            drv_svc_request,
-                                            Some(TransmissionResult::Retransmitting(attempt + 1)),
-                                        )
-                                    }
-                                    MacTaskTransition::Terminated(_) => unreachable!(),
+                    ServiceTaskTransition::Terminated(csma_ca_result) => match csma_ca_result {
+                        Ok(result) => {
+                            match result {
+                                TransmitWithCsmaCaResult::Sent(radio_frame, _nb) => {
+                                    // TODO: propagate NB
+                                    ServiceTaskTransition::Terminated(Ok(TransmissionResult::Sent(
+                                        radio_frame.forget_size::<RadioDriverImpl>(),
+                                    )))
                                 }
-                            } else {
-                                MacTaskTransition::Terminated(TransmissionResult::NoAck(
-                                    radio_frame,
-                                ))
+                                TransmitWithCsmaCaResult::NoAck(radio_frame) => {
+                                    if attempt <= context.borrow().pib.max_frame_retries {
+                                        // TODO: support non-CsmaCa based transmisson
+                                        match TransmitWithCsmaCaTask::<RadioDriverImpl>::new(
+                                            radio_frame,
+                                            context,
+                                        )
+                                        .step(ServiceTaskEvent::Entry)
+                                        {
+                                            ServiceTaskTransition::Intermediate(
+                                                csma_ca_task,
+                                                drv_svc_request,
+                                                _,
+                                            ) => {
+                                                self.state =
+                                                    TransmissionState::SendingFrameWithCsmaCa(
+                                                        attempt + 1,
+                                                        csma_ca_task,
+                                                        context,
+                                                    );
+                                                ServiceTaskTransition::Intermediate(
+                                                    self,
+                                                    drv_svc_request,
+                                                    Some(TransmissionResult::Retransmitting(
+                                                        attempt + 1,
+                                                    )),
+                                                )
+                                            }
+                                            ServiceTaskTransition::Terminated(_) => unreachable!(),
+                                        }
+                                    } else {
+                                        ServiceTaskTransition::Terminated(Ok(
+                                            TransmissionResult::NoAck(radio_frame),
+                                        ))
+                                    }
+                                }
+                                _ => unreachable!(),
                             }
                         }
-                        // Backoff Result is not a final result
-                        _ => unreachable!(),
+                        Err(task_error) => match task_error {
+                            TransmitWithCsmaCaError::ChannelAccessFailure(radio_frame) => {
+                                ServiceTaskTransition::Terminated(Err(
+                                    TransmissionError::ChannelAccessFailure(radio_frame),
+                                ))
+                            }
+                        },
                     },
                     _ => unreachable!(),
                 }
@@ -175,7 +193,7 @@ mod tests {
         generate_data_frame, FakeDriverConfig, FakeRadioTimer, FakeRng, TaskTestEvent,
         TaskTestTransition, TaskTester,
     };
-    use crate::mac::MacSvcContext;
+    use crate::mac::MacContext;
 
     use super::{TransmissionResult, TransmissionTask};
 
@@ -192,7 +210,7 @@ mod tests {
         let arbitrary_sequence = [1, 2, 4, 0];
         let mut rng = FakeRng::new(&arbitrary_sequence);
 
-        let context = RefCell::new(MacSvcContext {
+        let context = RefCell::new(MacContext {
             pib: Pib::default(),
             rng: &mut rng,
             timer: FakeRadioTimer::new(),
@@ -237,7 +255,7 @@ mod tests {
         let arbitrary_sequence = [1, 2, 4, 0];
         let mut rng = FakeRng::new(&arbitrary_sequence);
 
-        let context = RefCell::new(MacSvcContext {
+        let context = RefCell::new(MacContext {
             pib: Pib::default(),
             rng: &mut rng,
             timer: FakeRadioTimer::new(),
@@ -293,7 +311,7 @@ mod tests {
         let arbitrary_sequence = [1, 2, 4, 0];
         let mut rng = FakeRng::new(&arbitrary_sequence);
 
-        let context = RefCell::new(MacSvcContext {
+        let context = RefCell::new(MacContext {
             pib: Pib::default(),
             rng: &mut rng,
             timer: FakeRadioTimer::new(),
@@ -349,7 +367,7 @@ mod tests {
         let arbitrary_sequence = [1, 2, 4, 0];
         let mut rng = FakeRng::new(&arbitrary_sequence);
 
-        let context = RefCell::new(MacSvcContext {
+        let context = RefCell::new(MacContext {
             pib: Pib::default(),
             rng: &mut rng,
             timer: FakeRadioTimer::new(),
@@ -424,7 +442,7 @@ mod tests {
         let arbitrary_sequence = [1, 2, 4, 0];
         let mut rng = FakeRng::new(&arbitrary_sequence);
 
-        let context = RefCell::new(MacSvcContext {
+        let context = RefCell::new(MacContext {
             pib: Pib::default(),
             rng: &mut rng,
             timer: FakeRadioTimer::new(),
@@ -500,7 +518,7 @@ mod tests {
         let arbitrary_sequence = [1, 2, 4, 0];
         let mut rng = FakeRng::new(&arbitrary_sequence);
 
-        let context = RefCell::new(MacSvcContext {
+        let context = RefCell::new(MacContext {
             pib: Pib::default(),
             rng: &mut rng,
             timer: FakeRadioTimer::new(),
@@ -576,7 +594,7 @@ mod tests {
         let arbitrary_sequence = [1, 2, 4, 0];
         let mut rng = FakeRng::new(&arbitrary_sequence);
 
-        let context = RefCell::new(MacSvcContext {
+        let context = RefCell::new(MacContext {
             pib: Pib::default(),
             rng: &mut rng,
             timer: FakeRadioTimer::new(),
@@ -669,7 +687,7 @@ mod tests {
         let arbitrary_sequence = [1, 2, 4, 0];
         let mut rng = FakeRng::new(&arbitrary_sequence);
 
-        let context = RefCell::new(MacSvcContext {
+        let context = RefCell::new(MacContext {
             pib: Pib::default(),
             rng: &mut rng,
             timer: FakeRadioTimer::new(),

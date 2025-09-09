@@ -4,12 +4,15 @@
 //! 802.15.4 radio drivers.
 
 use core::cell::Cell;
+use paste::paste;
 
 use crate::{
     mac::{
         frame::mpdu::{imm_ack_frame, MpduFrame, ACK_MPDU_SIZE_WO_FCS},
         MacBufferAllocator,
     },
+    service::ServiceConfig,
+    service_config_no_lower, service_tasks,
     util::{
         frame::Frame,
         sync::{
@@ -1234,3 +1237,6 @@ where
         }
     }
 }
+
+service_config_no_lower!(DriverService);
+service_tasks!(DriverService, Tx, Rx, Off);

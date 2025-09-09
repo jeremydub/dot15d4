@@ -1,6 +1,11 @@
 #![cfg_attr(not(feature = "std"), no_std)]
-pub mod driver;
+mod driver;
 pub mod mac;
+mod pib;
+mod scheduler;
+mod service;
+
+use core::cell::RefCell;
 
 pub use dot15d4_util as util;
 use rand_core::RngCore;
@@ -14,9 +19,17 @@ use self::{
         },
         DriverRequestChannel, DriverService,
     },
-    mac::{MacBufferAllocator, MacIndicationSender, MacRequestReceiver, MacService},
+    mac::{MacBufferAllocator, MacRequestReceiver, MacService},
+    pib::Pib,
+    scheduler::{SchedulerRequestChannel, SchedulerService},
     util::sync::{select, Either},
 };
+
+pub(crate) struct MacContext<'upper_layer, RadioDriverImpl: DriverConfig> {
+    pib: Pib,
+    rng: &'upper_layer mut dyn RngCore,
+    timer: RadioDriverImpl::Timer,
+}
 
 pub struct Device<RadioDriverImpl: DriverConfig> {
     radio: RadioDriver<RadioDriverImpl, RadioTaskOff>,
@@ -37,58 +50,54 @@ where
     pub async fn run<'upper_layer>(
         self,
         buffer_allocator: MacBufferAllocator,
-        request_receiver: MacRequestReceiver<'upper_layer>,
-        indication_sender: MacIndicationSender<'upper_layer>,
+        mac_request_receiver: MacRequestReceiver<'upper_layer, RadioDriverImpl>,
         timer: RadioDriverImpl::Timer,
         rng: &'upper_layer mut dyn RngCore,
     ) -> ! {
         #[cfg(feature = "rtos-trace")]
         self::trace::instrument();
 
+        let context = RefCell::new(MacContext {
+            pib: Pib::default(),
+            rng,
+            timer,
+        });
+
+        let scheduler_service_channel = SchedulerRequestChannel::new();
         let driver_service_channel = DriverRequestChannel::new();
+
+        let mut mac_service = MacService::<RadioDriverImpl>::new(
+            &context,
+            buffer_allocator,
+            mac_request_receiver,
+            scheduler_service_channel.sender(),
+        );
+        let mut scheduler_service = SchedulerService::<'upper_layer, RadioDriverImpl>::new(
+            timer,
+            &context,
+            buffer_allocator,
+            scheduler_service_channel.receiver(),
+            driver_service_channel.sender(),
+        );
         let driver_service = DriverService::new(
             self.radio,
             driver_service_channel.receiver(),
             buffer_allocator,
         );
-        let mut mac_service = MacService::<'_, RadioDriverImpl>::new(
-            timer,
-            rng,
-            buffer_allocator,
-            request_receiver,
-            indication_sender,
-            driver_service_channel.sender(),
-        );
 
-        match select::select(mac_service.run(), driver_service.run()).await {
-            Either::First(_) => panic!("MAC service terminated"),
+        match select::select(
+            select::select(mac_service.run(), scheduler_service.run()),
+            driver_service.run(),
+        )
+        .await
+        {
+            Either::First(either) => match either {
+                Either::First(_) => panic!("MAC service terminated"),
+                Either::Second(_) => panic!("MAC Scheduler service terminated"),
+            },
             Either::Second(_) => panic!("Driver service terminated"),
         }
     }
-
-    // pub async fn start_as_coordinator(&mut self) {
-    //     self.scan_energy().await;
-    // }
-
-    // pub async fn start(&mut self) {
-    //     //
-    //     self.scan_channels().await;
-    // }
-
-    // async fn receive_beacon_request<'a>(
-    //     &self,
-    //     buffer: &mut [u8; 128],
-    //     radio_guard: &mut Option<MutexGuard<'a, R>>,
-    // ) {
-    //     receive(
-    //         &mut **radio_guard.as_mut().unwrap(),
-    //         buffer,
-    //         RxConfig {
-    //             channel: crate::phy::config::Channel::_26,
-    //         },
-    //     )
-    //     .await;
-    // }
 }
 
 #[cfg(feature = "rtos-trace")]
