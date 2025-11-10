@@ -953,6 +953,7 @@ impl ListeningRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
 
         let disable_at = latest_frame_start.map(|ts| ts + OQpsk250KBit::T_PHR);
         let mut disabled = false;
+        let mut should_disable = false;
         if let Some(disable_at) = disable_at {
             // Window widening is the responsibility of the client. Therefore,
             // the latest frame start designates an exact RMARKER in terms of
@@ -965,6 +966,18 @@ impl ListeningRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
                 Err(RadioTimerError::Already) => {
                     // The frame already started.
                     r.events_framestart.reset();
+                }
+                Err(RadioTimerError::Overdue(_)) => {
+                    if r.events_framestart
+                        .read()
+                        .events_framestart()
+                        .bit_is_clear()
+                    {
+                        // TODO: Remove this temporary assertion.
+                        #[cfg(not(debug_assertions))]
+                        panic!();
+                        should_disable = true;
+                    }
                 }
                 Err(err) => {
                     // Let the timer running as we're not leaving the listening state.
@@ -1007,6 +1020,10 @@ impl ListeningRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
                 },
             }
         } else {
+            should_disable = true;
+        }
+
+        if should_disable {
             r.tasks_disable.write(|w| w.tasks_disable().set_bit());
             // Disabling RX is so fast that scheduling an interrupt doesn't make
             // sense.
@@ -1238,13 +1255,14 @@ impl ReceivingRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
 
         let packetptr = rx_task.radio_frame.as_ptr() as u32;
 
+        let is_back_to_back_rx = ifs.is_none();
+
         RadioTransition::new(
             self,
             rx_task,
             move |this| {
                 let timer = this.start_timer(None)?;
 
-                let is_back_to_back_rx = ifs.is_none();
                 if is_back_to_back_rx {
                     // Back-to-back is only allowed if the rx window has ended
                     // with frame reception, i.e. the radio is still enabled.
@@ -1272,6 +1290,7 @@ impl ReceivingRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
                         Self::set_ifs(Some(ifs), true);
                         w.end_disable().enabled();
                         w.disabled_rxen().enabled();
+                        w.rxready_start().enabled();
                     } else {
                         w.end_start().enabled();
                     }
@@ -1281,13 +1300,18 @@ impl ReceivingRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
 
                 Ok(None)
             },
-            || {
+            move || {
                 // Check whether the task completed before we were able to
                 // automate the transition.
                 //
                 // Note: Read the state _after_ having set the short.
                 let r = Self::radio();
-                if r.state.read().state().is_rx_idle() {
+                if r.state.read().state().is_rx_idle()
+                    && r.events_framestart
+                        .read()
+                        .events_framestart()
+                        .bit_is_clear()
+                {
                     // We're idle, although we have a short in place: This means
                     // that the previous frame was fully received before we were
                     // able to set the short, i.e. reception of the new frame
@@ -1297,7 +1321,14 @@ impl ReceivingRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
                     //
                     // TODO: We currently have no way to enforce IFS in this
                     //       case.
-                    r.tasks_start.write(|w| w.tasks_start().set_bit());
+                    if is_back_to_back_rx {
+                        r.tasks_start.write(|w| w.tasks_start().set_bit());
+                    } else {
+                        // If end->disable short was set, radio must be disabled
+                        // first to enforce TIFS. disabled->rxen short will then
+                        // start reception.
+                        r.tasks_disable.write(|w| w.tasks_disable().set_bit());
+                    }
 
                     debug!("late scheduling");
                 };
