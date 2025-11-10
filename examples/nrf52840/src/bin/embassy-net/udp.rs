@@ -22,7 +22,7 @@ use embassy_net::{
 use heapless::Vec;
 use static_cell::StaticCell;
 
-const FRAME_PERIOD: LocalClockDuration = LocalClockDuration::millis(10);
+const FRAME_PERIOD: LocalClockDuration = LocalClockDuration::millis(40);
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
