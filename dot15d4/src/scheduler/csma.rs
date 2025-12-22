@@ -7,7 +7,7 @@ use dot15d4_util::{
 };
 
 use crate::driver::{DrvSvcEvent, DrvSvcRequest, DrvSvcTaskRx, DrvSvcTaskTx, Timestamp};
-use crate::scheduler::command::SchedulerCommand;
+use crate::scheduler::command::{SchedulerCommand, SetTschLinkResult, SetTschSlotframeResult};
 use crate::scheduler::{
     SchedulerRequest, SchedulerResponse, SchedulerTransmissionResult, TaskDirection,
 };
@@ -372,39 +372,64 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerService<'svc, RadioDriverImpl
     }
 
     async fn initial(&mut self) -> CsmaSchedulerState {
-        match self
-            .request_receiver
-            .try_receive_request(&TaskDirection::Outbound)
-        {
-            Some((sched_response_token, request)) => match request {
-                SchedulerRequest::Transmission(mpdu_frame) => {
+        loop {
+            match self
+                .request_receiver
+                .try_receive_request(&TaskDirection::Outbound)
+            {
+                Some((sched_response_token, request)) => match request {
+                    SchedulerRequest::Transmission(mpdu_frame) => {
+                        self.driver_request_sender
+                            .send(DrvSvcRequest::CompleteThenStartTx(DrvSvcTaskTx {
+                                at: Timestamp::BestEffort,
+                                radio_frame: mpdu_frame.into_radio_frame::<RadioDriverImpl>(),
+                                cca: false,
+                                channel: None,
+                                // First try so we expect to retransmit on NACK
+                                fallback_on_nack: true,
+                            }))
+                            .await;
+                        return CsmaSchedulerState::Transmitting(sched_response_token);
+                    }
+                    SchedulerRequest::Command(command) => match command {
+                        SchedulerCommand::UseTsch(_, _) => {
+                            return self.terminate(sched_response_token).await
+                        }
+                        SchedulerCommand::SetTschSlotframe(_set_slotframe_request) => {
+                            self.request_receiver.received(
+                                sched_response_token,
+                                SchedulerResponse::Command(
+                                    super::SchedulerCommandResult::SetTschSlotframe(
+                                        SetTschSlotframeResult::Success,
+                                    ),
+                                ),
+                            );
+                        }
+                        SchedulerCommand::SetTschLink(_set_link_request) => {
+                            self.request_receiver.received(
+                                sched_response_token,
+                                SchedulerResponse::Command(
+                                    super::SchedulerCommandResult::SetTschLink(
+                                        SetTschLinkResult::Success,
+                                    ),
+                                ),
+                            );
+                        }
+                        _ => unreachable!(),
+                    },
+                    _ => unreachable!(),
+                },
+                None => {
+                    let inbound_frame = self.rx_frame.take().unwrap();
                     self.driver_request_sender
-                        .send(DrvSvcRequest::CompleteThenStartTx(DrvSvcTaskTx {
-                            at: Timestamp::BestEffort,
-                            radio_frame: mpdu_frame.into_radio_frame::<RadioDriverImpl>(),
-                            cca: false,
+                        .send(DrvSvcRequest::CompleteThenStartRx(DrvSvcTaskRx {
+                            start: Timestamp::BestEffort,
+                            radio_frame: inbound_frame,
                             channel: None,
-                            // First try so we expect to retransmit on NACK
-                            fallback_on_nack: true,
                         }))
                         .await;
-                    CsmaSchedulerState::Transmitting(sched_response_token)
+                    return CsmaSchedulerState::WaitingForFrame;
                 }
-                SchedulerRequest::Command(SchedulerCommand::UseTsch(_, _)) => {
-                    self.terminate(sched_response_token).await
-                }
-                _ => unreachable!(),
-            },
-            None => {
-                let inbound_frame = self.rx_frame.take().unwrap();
-                self.driver_request_sender
-                    .send(DrvSvcRequest::CompleteThenStartRx(DrvSvcTaskRx {
-                        start: Timestamp::BestEffort,
-                        radio_frame: inbound_frame,
-                        channel: None,
-                    }))
-                    .await;
-                CsmaSchedulerState::WaitingForFrame
             }
         }
     }
